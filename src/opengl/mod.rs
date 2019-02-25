@@ -435,10 +435,10 @@ impl GlDraw {
 }
 
 pub mod gl_mesh {
+    use crate::VertexDataType;
     use gl;
     use gl::types::*;
     use std::marker::PhantomData;
-    use crate::VertexDataType;
     use VertexDataType::*;
 
     /// Represents mesh data that has been written to opengl and stored in graphics memory.

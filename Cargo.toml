@@ -16,3 +16,14 @@ nalgebra = "0.17.0"
 [dependencies.glfw]
 version = "0.21.0"
 features = ["default", "vulkan"]
+
+[features]
+default = ["opengl41"]
+
+opengl40 = []
+opengl41 = ["opengl40"]
+opengl42 = ["opengl41"]
+opengl43 = ["opengl42"]
+opengl44 = ["opengl43"]
+opengl45 = ["opengl44"]
+opengl46 = ["opengl45"]

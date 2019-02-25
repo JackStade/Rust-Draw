@@ -252,27 +252,27 @@ pub(super) fn get_program(vertex_source: &[u8], fragment_source: &[u8]) -> GLuin
 use self::swizzle::SwizzleMask;
 /// Swizzling operations are an important part of glsl.
 pub mod swizzle {
-	use super::super::super::swizzle as sz;
-	use super::super::super::swizzle::{SZ, Swizzle};
-	use super::traits::ArgType;
+    use super::super::super::swizzle as sz;
+    use super::super::super::swizzle::{Swizzle, SZ};
+    use super::traits::ArgType;
 
-	pub unsafe trait GlSZ {
-		type S: SZ;
+    pub unsafe trait GlSZ {
+        type S: SZ;
 
-		type Set;
+        type Set;
 
-		const Arg: &'static str;
-	}
+        const Arg: &'static str;
+    }
 
-	pub unsafe trait SwizzleMask<T4, T3, T2, T1, S> {
-		type Swizzle;
+    pub unsafe trait SwizzleMask<T4, T3, T2, T1, S> {
+        type Swizzle;
 
-		type Out: ArgType;
+        type Out: ArgType;
 
-		fn get_vars() -> String;
-	}
+        fn get_vars() -> String;
+    }
 
-	pub unsafe trait SwizzleDepth<Vec> {}
+    pub unsafe trait SwizzleDepth<Vec> {}
 
     macro_rules! swizzle_set {
     	($set:ident, $($vals:ident),*;$($vars:ident),*;$($s:ty),*) => (
@@ -322,7 +322,7 @@ pub mod swizzle {
     	($($top:ident,)*;;) => ();
     	($($top:ident,)*;$t0:ident, $($t:ident,)*;$s0:ident, $($s:ident,)*) => (
     		unsafe impl<S, T, $s0: GlSZ<Set=S> + SwizzleDepth<T>,$($s: GlSZ<Set=S> + SwizzleDepth<T>,)*
-    		$($top,)*$t0: ArgType,$($t),*> SwizzleMask<$($top,)*$t0,$($t,)*T> 
+    		$($top,)*$t0: ArgType,$($t),*> SwizzleMask<$($top,)*$t0,$($t,)*T>
     		for ($s0,$($s,)*) {
     			type Swizzle = ($s0::S,$($s::S,)*);
 
@@ -423,7 +423,7 @@ pub mod traits {
 		)
 	}
 
-	impl_shader_args! {; 0}
+    impl_shader_args! {; 0}
     impl_shader_args! {U1; 1 }
     impl_shader_args! {U1, U2; 2}
     impl_shader_args! {U1, U2, U3; 3}
@@ -555,8 +555,17 @@ macro_rules! vec_swizzle {
 	($($types:ident),*) => (
 		vec_swizzle!($($types,)*;$($types,)*;Vec4, Vec3, Vec2, Vec1,);
 	);
-	(;$($types:ident,)*;) => ();
-	($vec:ident, $($next:ident,)*;$($types:ident,)*;$sz:ident, $($s:ident,)*) => (
+    ($vec:ident,;$($types:ident,)*;$sz:ident,) => (
+        #[cfg(feature = "opengl42")]
+        impl $vec {
+            pub fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(self, mask: T) -> T::Out {
+                unsafe {
+                    T::Out::create(format!("{}.{}", self.data, T::get_vars()))
+                }
+            }
+        }
+    );
+	($vec:ident, $($next:ident,)+;$($types:ident,)*;$sz:ident, $($s:ident,)*) => (
 		impl $vec {
 			pub fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(self, mask: T) -> T::Out {
 				unsafe {
@@ -569,8 +578,32 @@ macro_rules! vec_swizzle {
 	);
 }
 
+macro_rules! vec_litteral {
+    ($tag:expr, $t:ty, $($arg:ident),*;$($f:ident),*;$($v:ident),*) => (
+        vec_litteral!($tag, $($t, $arg, $f, $v,)*);
+    );
+    ($tag:expr,) => ();
+    ($tag:expr, $t0:ty, $a0:ident, $f0:ident, $v0:ident, $($t:ty, $arg:ident, $f:ident, $v:ident,)*) => (
+        unsafe impl $a0 for ($t0,$($t),*) {
+            fn $f0(self) -> $v0 {
+                let ($f0,$($f),*) = self;
+                $v0 {
+                    data: format!("{}({})", $v0::data_type().gl_type(), 
+                        concat!(format!("{}{}", $f0, $tag),$(format!("{}{}", $f, $tag),)*)),
+                }
+            }
+        }
+
+        vec_litteral!($tag, $($t, $arg, $f, $v,)*);
+    )
+}
+
 vec_types!(Float4, Float3, Float2, Float,;
 	float4, float3, float2, float,;
 	Float4Arg, Float3Arg, Float2Arg, FloatArg,);
 
 vec_swizzle!(Float4, Float3, Float2, Float);
+
+vec_litteral!("f", f32, Float4Arg, Float3Arg, Float2Arg, FloatArg; 
+    float4, float3, float2, float;
+    Float4, Float3, Float2, Float);

@@ -14,9 +14,16 @@ use shader::traits::*;
 use swizzle::SwizzleInPlace;
 
 pub fn test_window() {
-    println!("{}", shader::create_shader_string(|input: (shader::Float2, shader::Float3), uniforms: ()|{
-        (input.0.map((shader::swizzle::r, shader::swizzle::g, shader::swizzle::r)) + input.1,)
-    }));
+    println!(
+        "{}",
+        shader::create_shader_string(|input: (shader::Float2, shader::Float3), uniforms: ()| (
+            input
+                .0
+                .map((shader::swizzle::r, shader::swizzle::g, shader::swizzle::r))
+                + input.1
+                + shader::float3((1.0, 1.0, 1.0)),
+        ))
+    );
     let mut array = [vec![0; 5], vec![1; 2], vec![3]];
     array.swizzle((swizzle::a, swizzle::c, swizzle::b));
     println!("{}", array[1][0]);
