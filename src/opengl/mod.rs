@@ -2,6 +2,7 @@ extern crate gl;
 extern crate glfw;
 extern crate parking_lot;
 
+use nalgebra as na;
 use std::ffi::CString;
 use std::fmt;
 use std::fs::File;
@@ -13,7 +14,6 @@ use std::str;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, ATOMIC_BOOL_INIT, ATOMIC_USIZE_INIT};
 use std::sync::mpsc::Receiver;
 use std::thread;
-use nalgebra as na;
 
 use crate::color;
 use crate::CoordinateSpace;

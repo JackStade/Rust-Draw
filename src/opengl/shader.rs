@@ -1,10 +1,10 @@
 use self::traits::*;
+use std::cmp;
+use std::fmt;
 use std::marker::PhantomData;
-use std::ops::{Add, Mul};
+use std::ops::{Add, Div, Mul};
 use std::ptr;
 use std::str;
-use std::fmt;
-use std::cmp;
 
 use super::gl;
 use super::gl::types::*;
@@ -70,6 +70,10 @@ pub enum DataType {
     Float2,
     Float3,
     Float4,
+    Int,
+    Int2,
+    Int3,
+    Int4,
     Mat2,
     Mat3,
     Mat4,
@@ -82,6 +86,10 @@ impl DataType {
             DataType::Float2 => "vec2",
             DataType::Float3 => "vec3",
             DataType::Float4 => "vec4",
+            DataType::Int => "int",
+            DataType::Int2 => "ivec2",
+            DataType::Int3 => "ivec3",
+            DataType::Int4 => "ivec4",
             DataType::Mat2 => "mat2",
             DataType::Mat3 => "mat3",
             DataType::Mat4 => "mat4",
@@ -435,6 +443,23 @@ pub mod traits {
     impl_shader_args! {U1, U2, U3, U4, U5, U6; 6}
 }
 
+// the complement of implementations for certain vec ops. Need to
+// be careful not to redefine.
+macro_rules! vec_ops_reverse {
+    ($vec_type:ident, $s0:ident,) => ();
+    ($vec_type:ident, $s0:ident, $($sub:ident,)+) => (
+        impl Mul<last!($($sub,)*)> for $vec_type {
+            type Output = $vec_type;
+
+            fn mul(self, rhs: last!($($sub,)*)) -> $vec_type {
+                $vec_type {
+                    data: format!("({} * {})", self.data, rhs.data),
+                }
+            }
+        }
+    )
+}
+
 macro_rules! vec_type {
     ($vec:ident, $vec_type:ident, $trait:ident, $data:expr, $($sub:ident,)*) => (
     	#[derive(Clone)]
@@ -442,12 +467,34 @@ macro_rules! vec_type {
             data: String,
         }
 
+        impl Mul<$vec_type> for last!($($sub,)*) {
+            type Output = $vec_type;
+
+            fn mul(self, rhs: $vec_type) -> $vec_type {
+                $vec_type {
+                    data: format!("({} * {})", self.data, rhs.data),
+                }
+            }
+        }
+
+        impl Div<last!($($sub,)*)> for $vec_type {
+            type Output = $vec_type;
+
+            fn div(self, rhs: last!($($sub,)*)) -> $vec_type {
+                $vec_type {
+                    data: format!("({} / {})", self.data, rhs.data),
+                }
+            }
+        }
+
+        vec_ops_reverse!($vec_type, $($sub,)*);
+
         impl Add for $vec_type {
         	type Output = $vec_type;
 
         	fn add(self, rhs: $vec_type) -> $vec_type {
         		$vec_type {
-        			data: format!("{} + {}", self.data, rhs.data),
+        			data: format!("({} + {})", self.data, rhs.data),
         		}
         	}
         }
@@ -562,7 +609,7 @@ macro_rules! vec_swizzle {
         #[cfg(feature = "opengl42")]
         impl $vec {
             /// Applies a swizzle mask to the vector type. Note that this is only availible for
-            /// single item types when version >= opengl42.
+            /// single item types when version >= opengl4.2.
             pub fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(self, mask: T) -> T::Out {
                 unsafe {
                     T::Out::create(format!("{}.{}", self.data, T::get_vars()))
@@ -594,7 +641,7 @@ macro_rules! vec_litteral {
             fn $f0(self) -> $v0 {
                 let ($f0,$($f),*) = self;
                 $v0 {
-                    data: format!("{}({})", $v0::data_type().gl_type(), 
+                    data: format!("{}({})", $v0::data_type().gl_type(),
                         concat!(format!("{}{}", $f0, $tag),$(format!("{}{}", $f, $tag),)*)),
                 }
             }
@@ -604,12 +651,41 @@ macro_rules! vec_litteral {
     )
 }
 
-vec_types!(Float4, Float3, Float2, Float,;
-	float4, float3, float2, float,;
-	Float4Arg, Float3Arg, Float2Arg, FloatArg,);
+macro_rules! last {
+    ($arg:ident,) => (
+        $arg
+    );
+    ($a0:ident, $($args:ident,)+) => (
+        last!($($args,)*)
+    )
+}
 
-vec_swizzle!(Float4, Float3, Float2, Float);
+macro_rules! first {
+    ($arg:ident, $($args:ident,)*) => {
+        $arg
+    };
+}
 
-vec_litteral!("f", f32, Float4Arg, Float3Arg, Float2Arg, FloatArg; 
+macro_rules! create_vec {
+    ($ty:ty, $suffix:expr, $($obj:ident),*; $($func:ident),*; $($arg:ident),*) => {
+        vec_types!($($obj,)*;$($func,)*;$($arg,)*);
+        vec_swizzle!($($obj),*);
+        vec_litteral!($suffix, $ty, $($arg),*;$($func),*;$($obj),*);
+    }
+}
+
+create_vec!(f32, "f", Float4, Float3, Float2, Float;
     float4, float3, float2, float;
-    Float4, Float3, Float2, Float);
+    Float4Arg, Float3Arg, Float2Arg, FloatArg);
+
+create_vec!(i32, "", Int4, Int3, Int2, Int;
+    int4, int3, int2, int;
+    Int4Arg, Int3Arg, Int2Arg, IntArg);
+
+unsafe impl FloatArg for Int {
+    fn float(self) -> Float {
+        Float {
+            data: format!("float({})", self.data),
+        }
+    }
+}

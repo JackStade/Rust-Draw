@@ -9,21 +9,22 @@ pub mod opengl;
 #[allow(non_snake_case)]
 pub mod swizzle;
 
+use nalgebra as na;
 use opengl::shader;
 use shader::traits::*;
 use swizzle::SwizzleInPlace;
-use nalgebra as na;
 
 pub fn test_window() {
     println!(
         "{}",
-        shader::create_shader_string(|input: (shader::Float2, shader::Float3), uniforms: ()| (
-            input
+        shader::create_shader_string(|input: (shader::Float2, shader::Float3), uniforms: ()| {
+            let s = input.1 / shader::float((3.0,));
+            (input
                 .0
                 .map((shader::swizzle::r, shader::swizzle::g, shader::swizzle::r))
-                + input.1
-                + shader::float3((1.0, 1.0, 1.0)),
-        ))
+                + s
+                + shader::float3((1.0, 1.0, 1.0)),)
+        })
     );
     let mut array = [vec![0; 5], vec![1; 2], vec![3]];
     array.swizzle((swizzle::a, swizzle::c, swizzle::b));
