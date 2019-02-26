@@ -80,6 +80,171 @@ pub enum DataType {
     Mat4,
 }
 
+
+// while the structures used for generating glsl code are purely
+// functional, glsl is not a functional language by any stretch of
+// the imagination. This type represents a glsl expression that has side
+// effects. Every glsl contains of list of the side effects that its represented
+// value depends on.
+//
+// each object has a seperate space of variable name ids, and stores a complete
+// list of neccesary dependencies. 
+// every side effect layer has a namespace that the next layer refers to
+// each layer also inherits the namespaces of previous layers.
+#[derive(Clone, PartialEq)]
+enum SideEffect {
+    // (type, var, assignment)
+    // note that the var here refers to the current
+    // side effect namespace, while in most other cases it refers to
+    Declaration(DataType, usize, String),
+    // (var, postfix, assignment)
+    Assignment(usize, String, String),
+    // (loop expression, vars, loop effects)
+    // a loop acts like a declaration, adding a number of variables to its
+    // level.
+    // 
+    Loop(LoopIter, Vec<String>, SideEffects),
+}
+
+// contains a list of layers, each layer holding a number of side effects
+struct SideEffects {
+    list: Vec<Vec<SideEffect>>,
+    // the maximum number of variables at each stage
+    max_var: Vec<usize>,
+}
+
+// this function is hugely important to side effect processing.
+// it takes two effect lists and combines them
+fn merge_effects(s1: SideEffects, s2: SideEffects) -> SideEffects {
+    let l1 = s1.list.len();
+    let l2 = s2.list.len()
+    let len = cmp::max(l1, l2);
+    let mut max = vec![0; len];
+    for i in 0..l1 {
+        max[i] += s1.max_var[i];
+    }
+    for i in 0..l2 {
+        max[k] += s2.max_var[i];
+    }
+    let mut list = Vec::new();
+    for i in 0..len {
+
+    }
+}
+
+fn merge_layer(mut v1: Vec<SideEffect>, v2: Vec<SideEffect>) -> Vec<SideEffect> {
+    while let Some(s) = v2.pop() {
+        match s {
+            // control flow statements can't be compared in the same way
+            // as simpler statements
+            SideEffect::Loop(iter, vars, effects) => {
+                let mut found = None;
+                for i in 0..v1.len() {
+                    if let ref SideEffect::Loop(iter, v2, e2) = &v1[i] {
+                        found = Some(i);
+                        break;
+                    }
+                }
+                if let Some(i) = found {
+                    let l = v1.swap_remove(i);
+                    if let SideEffect::Loop(iter, v2, e2) = l {
+                        let nvars = merge_vec(vars, v2);
+                        let ne = merge_effects(effects, e2);
+                        v1.push(SideEffect::Loop(iter, var, effects));
+                    } else {
+                        unreachable!();
+                    }
+                } else {
+                    v1.push(SideEffect::Loop(iter, var, effects));
+                }
+            },
+            s => {
+                let mut found = None;
+                for i in 0..v1.len() {
+                    if v1[i] == s {
+                        found = Some(i);
+                        break;
+                    }
+                }
+                if let None = found {
+                    v1.push(s);
+                }
+            }
+        }
+    }
+}
+
+fn merge_vec<T: PartialEq>(mut v1: Vec<T>, v2: Vec<T>) -> Vec<T> {
+    while let Some(v) = v2.pop() {
+        let mut found = None;
+        for i in 0..v1.len() {
+            if ref v1[i] == &v {
+                found = Some(i);
+                break;
+            }
+            if let None = found {
+                v1.push(v);
+            }
+        }
+    }
+    v1
+}
+
+// represents the main body of a glsl loop
+#[derive(Clone, PartialEq)]
+struct LoopIter {
+    ty: DataType,
+    // the values of these strings are dependent on the previous layer
+    start: String,
+    end: String,
+    incr: String,
+}
+
+impl LoopIter {
+    fn fix<F: Fn(usize) -> T, T: fmt::Display>(self, fix: &F) -> LoopIter {
+        LoopIter {
+            ty: self.DataType,
+            start: fix_string(self.start, fix),
+            end: fix_string(self.start, fix),
+            incr: fix_string(self.incr, fix),
+        }
+    }
+}
+
+impl SideEffect {
+    // writes the var names from the previous layer into this layer, allowing 
+    // `equals` to function properly
+    fn fix<F: Fn(usize) -> T, T: fmt::Display>(self, fix: &F) -> SideEffectType {
+        match self {
+            SideEffectType::Declaration(ty, var, assign) => {
+                SideEffectType::Declaration(ty, var, fix_string(assign, vars))
+            },
+            SideEffectType::Assignment(var, pfix, assign) => {
+                SideEffectType::Assignment(var, pfix, fix_string(assign, vars))
+            }
+            _ => (unimplemented!())
+        }
+    }
+}
+
+// used to convert between namespaces
+fn fix_string<F: Fn(usize) -> T, T: fmt::Display>(string: String, fix: &F) -> String {
+    let mut s = String::new();
+    let mut frags = string.split('$');
+    loop {
+        match (frags.next(), frags.next()) {
+            (Some(st), Some(n)) => {
+                s = format!("{}{}{}", s, st, fix(n.parse::<usize>().unwrap()));
+            }
+            (Some(st), None) => {
+                s = format!("{}{}", s, st);
+            }
+            _ => break,
+        }
+    }
+    s
+}
+
 impl DataType {
     pub fn gl_type(self) -> &'static str {
         match self {
