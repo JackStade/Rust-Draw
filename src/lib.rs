@@ -12,6 +12,7 @@ pub mod swizzle;
 use opengl::shader;
 use shader::traits::*;
 use swizzle::SwizzleInPlace;
+use nalgebra as na;
 
 pub fn test_window() {
     println!(
@@ -105,15 +106,15 @@ impl CoordinateSpace {
         }
     }
 
-    fn get_matrix(&self, width: i32, height: i32, scale: i32) -> [f32; 16] {
+    fn get_matrix(&self, width: i32, height: i32, scale: i32) -> na::Matrix4<f32> {
         let (diag, homo) = self.get_transform_data(width, height, scale);
         // column-major matrix
-        [
+        na::Matrix4::<f32>::from_column_slice(&[
             diag[0], 0.0, 0.0, 0.0, //
             0.0, diag[1], 0.0, 0.0, //
             0.0, 0.0, diag[2], 0.0, //
             homo[0], homo[1], homo[2], 1.0, //
-        ]
+        ])
     }
 
     fn get_transform_data(&self, width: i32, height: i32, scale: i32) -> ([f32; 3], [f32; 3]) {

@@ -3,6 +3,8 @@ use std::marker::PhantomData;
 use std::ops::{Add, Mul};
 use std::ptr;
 use std::str;
+use std::fmt;
+use std::cmp;
 
 use super::gl;
 use super::gl::types::*;
@@ -102,6 +104,7 @@ pub struct ShaderArgList {
 pub enum ShaderType {
     Vertex,
     Fragment,
+    #[cfg(feature = "opengl43")]
     Compute,
 }
 
@@ -558,6 +561,8 @@ macro_rules! vec_swizzle {
     ($vec:ident,;$($types:ident,)*;$sz:ident,) => (
         #[cfg(feature = "opengl42")]
         impl $vec {
+            /// Applies a swizzle mask to the vector type. Note that this is only availible for
+            /// single item types when version >= opengl42.
             pub fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(self, mask: T) -> T::Out {
                 unsafe {
                     T::Out::create(format!("{}.{}", self.data, T::get_vars()))
@@ -567,6 +572,7 @@ macro_rules! vec_swizzle {
     );
 	($vec:ident, $($next:ident,)+;$($types:ident,)*;$sz:ident, $($s:ident,)*) => (
 		impl $vec {
+            /// Applies a swizzle mask to the vector type.
 			pub fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(self, mask: T) -> T::Out {
 				unsafe {
 					T::Out::create(format!("{}.{}", self.data, T::get_vars()))

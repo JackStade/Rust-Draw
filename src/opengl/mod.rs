@@ -13,6 +13,7 @@ use std::str;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, ATOMIC_BOOL_INIT, ATOMIC_USIZE_INIT};
 use std::sync::mpsc::Receiver;
 use std::thread;
+use nalgebra as na;
 
 use crate::color;
 use crate::CoordinateSpace;
@@ -166,7 +167,7 @@ struct WindowCore {
     // vao for free drawing
     vao: GLuint,
 
-    base_matrix: [f32; 16],
+    base_matrix: na::Matrix4<f32>,
     coordinate_space: CoordinateSpace,
     width: i32,
     height: i32,
@@ -698,11 +699,11 @@ impl GlWindow {
     /// Transforms the window. Any drawing done on the window inside of `draw` will have this transform applied.
     pub fn draw_with_transform<T: FnMut(&mut GlWindow)>(
         &mut self,
-        transform: [f32; 16],
+        transform: na::Matrix4<f32>,
         mut draw: T,
     ) {
         check_window!(self.id, gl_draw, window);
-        let mut old_matrix = transform;
+        let mut old_matrix = transform * window.base_matrix;
         std::mem::swap(&mut old_matrix, &mut window.base_matrix);
         draw(self);
         std::mem::swap(&mut old_matrix, &mut window.base_matrix);
