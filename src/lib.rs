@@ -15,7 +15,7 @@ use shader::traits::*;
 use swizzle::SwizzleInPlace;
 
 pub fn test_window() {
-    println!(
+    /*println!(
         "{}",
         shader::create_shader_string(|input: (shader::Float2, shader::Float3), uniforms: ()| {
             let s = input.1 / shader::float((3.0,));
@@ -25,7 +25,7 @@ pub fn test_window() {
                 + s
                 + shader::float3((1.0, 1.0, 1.0)),)
         })
-    );
+    );*/
     let mut array = [vec![0; 5], vec![1; 2], vec![3]];
     array.swizzle((swizzle::a, swizzle::c, swizzle::b));
     println!("{}", array[1][0]);

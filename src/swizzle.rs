@@ -85,6 +85,17 @@ macro_rules! swizzle_where {
 			}
 		}
 
+		impl<$($mask,)*> Swizzle<($($mask,)*)> for usize
+		where $(
+			$mask: SZ,
+		)* {
+			type Output = usize;
+
+			fn swizzle(self, _: ($($mask,)*)) -> usize {
+				[$($mask::N),*][self]
+			}
+		}
+
 		impl<$($mask,)*T> SwizzleInPlace<($($mask,)*)> for [T]
 		where $(
 			$mask: SZ $(+ Not<$t>)*,

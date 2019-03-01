@@ -18,10 +18,9 @@ version = "0.21.0"
 features = ["default", "vulkan"]
 
 [features]
-default = ["opengl41"]
+default = ["opengl46"]
 
-opengl40 = []
-opengl41 = ["opengl40"]
+opengl41 = []
 opengl42 = ["opengl41"]
 opengl43 = ["opengl42"]
 opengl44 = ["opengl43"]
