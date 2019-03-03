@@ -178,3 +178,83 @@ macro_rules! swizzle_traits {
 }
 
 swizzle_types!(A, B, C, D, E, F;a, b, c, d, e, f;0, 1, 2, 3, 4, 5;S1, S2, S3, S4, S5, S6);
+
+pub trait AttachFront<T> {
+    type AttachFront;
+
+    fn attach_front(self, t: T) -> Self::AttachFront;
+}
+
+pub trait AttachBack<T> {
+    type AttachBack;
+
+    fn attach_back(self, t: T) -> Self::AttachBack;
+}
+
+pub trait RemoveFront {
+    type Front;
+    type Remaining;
+
+    fn remove_front(self) -> (Self::Front, Self::Remaining);
+}
+
+pub trait RemoveBack {
+    type Back;
+    type Remaining;
+
+    fn remove_back(self) -> (Self::Back, Self::Remaining);
+}
+
+macro_rules! tuple_vec_operations {
+	() => ();
+	($t0:ident, $($t:ident,)*) => (
+		impl<$t0,$($t,)*> AttachFront<$t0> for ($($t,)*) {
+			type AttachFront = ($t0,$($t,)*);
+
+			fn attach_front(self, v: $t0) -> Self::AttachFront {
+				let ($($t,)*) = self;
+
+				(v,$($t,)*)
+			}
+		}
+
+		impl<$t0,$($t,)*> AttachBack<$t0> for ($($t,)*) {
+			type AttachBack = ($($t,)*$t0,);
+
+			fn attach_back(self, v: $t0) -> Self::AttachBack {
+				let ($($t,)*) = self;
+
+				($($t,)*v,)
+			}
+		}
+
+		impl<$t0,$($t,)*> RemoveFront for ($t0,$($t,)*) {
+			type Front = $t0;
+			type Remaining = ($($t,)*);
+
+			fn remove_front(self) -> (Self::Front, Self::Remaining) {
+				let ($t0,$($t,)*) = self;
+
+				($t0, ($($t,)*))
+			}
+		}
+
+		impl<$t0,$($t,)*> RemoveBack for ($($t,)*$t0,) {
+			type Back = $t0;
+			type Remaining = ($($t,)*);
+
+			fn remove_back(self) -> (Self::Back, Self::Remaining) {
+				let ($($t,)*$t0,) = self;
+
+				($t0, ($($t,)*))
+			}
+		}
+
+		tuple_vec_operations!($($t,)*);
+	)
+}
+
+tuple_vec_operations!(
+    U1, U2, U3, U4, U5, U6, U7, U8, U9, U10, U11, U12, U13, U14, U15, U16, U17, U18, U19, U20, U21,
+    U22, U23, U24, U25, U26, U27, U28, U29, U30, U31, U32,
+);

@@ -55,7 +55,7 @@ pub fn get_gl() -> Result<GlDraw, InitError> {
         if glfw_raw::glfwInit() == glfw_raw::TRUE {
             // default opengl version
             glfw_raw::glfwWindowHint(glfw_raw::CONTEXT_VERSION_MAJOR, 4);
-            glfw_raw::glfwWindowHint(glfw_raw::CONTEXT_VERSION_MINOR, 1);
+            glfw_raw::glfwWindowHint(glfw_raw::CONTEXT_VERSION_MINOR, 5);
             // glfw options
             glfw_raw::glfwWindowHint(glfw_raw::OPENGL_FORWARD_COMPAT, true as c_int);
             glfw_raw::glfwWindowHint(

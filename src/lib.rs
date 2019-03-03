@@ -13,24 +13,25 @@ use nalgebra as na;
 use opengl::shader;
 use shader::traits::*;
 use swizzle::SwizzleInPlace;
+use std::time::{Duration, Instant};
 
 pub fn test_window() {
-    /*println!(
-        "{}",
-        shader::create_shader_string(|input: (shader::Float2, shader::Float3), uniforms: ()| {
-            let s = input.1 / shader::float((3.0,));
-            (input
-                .0
-                .map((shader::swizzle::r, shader::swizzle::g, shader::swizzle::r))
-                + s
-                + shader::float3((1.0, 1.0, 1.0)),)
-        })
-    );*/
-    let mut array = [vec![0; 5], vec![1; 2], vec![3]];
-    array.swizzle((swizzle::a, swizzle::c, swizzle::b));
-    println!("{}", array[1][0]);
     let mut gl = opengl::get_gl().unwrap();
     let mut window = gl.new_window(800, 800, CoordinateSpace::PixelsTopLeft, "Test Window");
+    let proto = shader::simple_prototype::<
+        (),
+        (shader::Float3, shader::Float4),
+        (shader::Float4,),
+        (shader::Float4,),
+    >();
+    let now = Instant::now();
+    let shader_program = shader::create_program(
+        &mut gl,
+        &proto,
+        |input, _| (shader::float4((input.0, shader::float(1.0))), input.1),
+        |input, _| (input.0,),
+    );
+
     let mut tex = Vec::with_capacity(4 * 128 * 128);
     for i in 0..128 {
         for k in 0..128 {
