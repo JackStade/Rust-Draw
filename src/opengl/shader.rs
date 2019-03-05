@@ -11,7 +11,7 @@ use super::gl;
 use super::gl::types::*;
 
 pub(super) const COLOR_VERTEX_SHADER_SOURCE: &[u8] = b"
-#version 410 core
+#version 400 core
 
 layout (location = 0) in vec3 aPos;
 
@@ -23,7 +23,7 @@ void main() {
 ";
 
 pub(super) const COLOR_FRAGMENT_SHADER_SOURCE: &[u8] = b"
-#version 410 core
+#version 400 core
 
 uniform vec4 color;
 
@@ -35,7 +35,7 @@ void main() {
 ";
 
 pub(super) const TEX_VERTEX_SHADER_SOURCE: &[u8] = b"
-#version 410 core
+#version 400 core
 
 uniform mat4 transform;
 
@@ -51,7 +51,7 @@ void main() {
 ";
 
 pub(super) const TEX_FRAGMENT_SHADER_SOURCE: &[u8] = b"
-#version 410 core
+#version 400 core
 
 uniform sampler2D sampler;
 
