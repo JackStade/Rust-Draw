@@ -286,6 +286,7 @@ unsafe impl<
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct ShaderParamSet<U: ShaderArgs, I: ShaderArgs, P: ShaderArgs, O: ShaderArgs> {
     phantom: PhantomData<(U, I, P, O)>,
 }
@@ -326,9 +327,39 @@ pub fn full_prototype<
     }
 }
 
+/// This is a helper function that generates a prototype that uses the position
+/// vertex shader output and the depth fragment shader output.
+pub fn depth_prototype<
+    U: ShaderArgs,
+    I: ShaderArgsClass<InterfaceArgs>,
+    P: ShaderArgsClass<TransparentArgs>,
+    O: ShaderArgsClass<InterfaceArgs>,
+>(
+    set: ShaderParamSet<U, I, P, O>,
+) -> FullPrototype<
+    U,
+    I,
+    P,
+    O,
+    (),
+    (),
+    (builtin_vars::BuiltInVar<Float4, builtin_vars::Position>,),
+    (),
+    (builtin_vars::BuiltInVar<Float, builtin_vars::Depth>,),
+>
+where
+    (): BuiltInVars<U> + BuiltInVars<I> + BuiltInVars<P>,
+    (builtin_vars::BuiltInVar<Float4, builtin_vars::Position>,): BuiltInVars<P>,
+    (builtin_vars::BuiltInVar<Float, builtin_vars::Depth>,): BuiltInVars<O>,
+{
+    FullPrototype {
+        phantom: PhantomData,
+    }
+}
+
 pub mod builtin_vars {
     use super::{ArgType, ShaderArgs};
-    use super::{Int, Float, Float2, Float3, Float4};
+    use super::{Float, Float2, Float3, Float4, Int};
     use crate::swizzle::{AttachBack, AttachFront, RemoveBack, RemoveFront};
     use std::marker::PhantomData;
 

@@ -20,12 +20,7 @@ use swizzle::SwizzleInPlace;
 pub fn test_window() {
     let mut gl = opengl::get_gl().unwrap();
     let mut window = gl.new_window(800, 800, CoordinateSpace::PixelsTopLeft, "Test Window");
-    let proto = shader::full_prototype(
-        |_| (),
-        |_| (),
-        |v| (v.position,),
-        |_| (),
-        |v| (v.depth,),
+    let proto = shader::depth_prototype(
         shader::ShaderParamSet::<
             (),
             (shader::Float3, shader::Float4),
