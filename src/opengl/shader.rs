@@ -64,23 +64,6 @@ void main() {
 }
 ";
 
-/// Represents a glsl data type.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum DataType {
-    Float,
-    Float2,
-    Float3,
-    Float4,
-    Int,
-    Int2,
-    Int3,
-    Int4,
-    Mat2,
-    Mat3,
-    Mat4,
-}
-
-
 // while the structures used for generating glsl code are purely
 // functional, glsl is not a functional language by any stretch of
 // the imagination. This type represents a glsl expression that has side
@@ -243,6 +226,22 @@ fn fix_string<F: Fn(usize) -> T, T: fmt::Display>(string: String, fix: &F) -> St
         }
     }
     s
+}
+
+/// Represents a glsl data type.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DataType {
+    Float,
+    Float2,
+    Float3,
+    Float4,
+    Int,
+    Int2,
+    Int3,
+    Int4,
+    Mat2,
+    Mat3,
+    Mat4,
 }
 
 impl DataType {
