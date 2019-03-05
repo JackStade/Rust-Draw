@@ -195,7 +195,7 @@ where
 
     fn vert_outputs(i: usize) -> VarType {
         if i == 0 {
-            VarType::Internal(builtin_vars::POSITION)
+            VarType::Internal("gl_Position")
         } else {
             VarType::Declare("p", i - 1)
         }
@@ -207,6 +207,268 @@ where
 
     fn frag_outputs(i: usize) -> VarType {
         VarType::Declare("o", i)
+    }
+}
+
+use builtin_vars::{
+    BuiltInFragInputs, BuiltInFragOutputs, BuiltInUniforms, BuiltInVars, BuiltInVertInputs,
+    BuiltInVertOutputs,
+};
+
+/// A full prototype is capable of referencing a full set of different
+/// built in variables, like depth and stencils values, vertex id, sample mask,
+/// etc.
+pub struct FullPrototype<
+    U: ShaderArgs,
+    I: ShaderArgsClass<InterfaceArgs>,
+    P: ShaderArgsClass<TransparentArgs>,
+    O: ShaderArgsClass<InterfaceArgs>,
+    UB: BuiltInVars<U>,
+    IB: BuiltInVars<I>,
+    VertPB: BuiltInVars<P>,
+    FragPB: BuiltInVars<P>,
+    OB: BuiltInVars<O>,
+> {
+    phantom: PhantomData<(U, I, P, O, UB, IB, VertPB, FragPB, OB)>,
+}
+
+unsafe impl<
+        U: ShaderArgs,
+        I: ShaderArgsClass<InterfaceArgs>,
+        P: ShaderArgsClass<TransparentArgs>,
+        O: ShaderArgsClass<InterfaceArgs>,
+        UB: BuiltInVars<U>,
+        IB: BuiltInVars<I>,
+        VertPB: BuiltInVars<P>,
+        FragPB: BuiltInVars<P>,
+        OB: BuiltInVars<O>,
+    > ProgramPrototype<U, UB::Tuple, I, IB::Tuple, O, OB::Tuple, VertPB::Tuple, FragPB::Tuple>
+    for FullPrototype<U, I, P, O, UB, IB, VertPB, FragPB, OB>
+{
+    fn uniforms(i: usize) -> VarType {
+        if (i < UB::LEN) {
+            VarType::Internal(UB::get_name(i))
+        } else {
+            VarType::Declare("u", i - UB::LEN)
+        }
+    }
+
+    fn vert_inputs(i: usize) -> VarType {
+        if (i < IB::LEN) {
+            VarType::Internal(IB::get_name(i))
+        } else {
+            VarType::Declare("i", i - IB::LEN)
+        }
+    }
+
+    fn vert_outputs(i: usize) -> VarType {
+        if (i < VertPB::LEN) {
+            VarType::Internal(VertPB::get_name(i))
+        } else {
+            VarType::Declare("p", i - VertPB::LEN)
+        }
+    }
+
+    fn frag_inputs(i: usize) -> VarType {
+        if (i < FragPB::LEN) {
+            VarType::Internal(FragPB::get_name(i))
+        } else {
+            VarType::Declare("p", i - FragPB::LEN)
+        }
+    }
+
+    fn frag_outputs(i: usize) -> VarType {
+        if (i < OB::LEN) {
+            VarType::Internal(OB::get_name(i))
+        } else {
+            VarType::Declare("o", i - OB::LEN)
+        }
+    }
+}
+
+pub struct ShaderParamSet<U: ShaderArgs, I: ShaderArgs, P: ShaderArgs, O: ShaderArgs> {
+    phantom: PhantomData<(U, I, P, O)>,
+}
+
+impl<U: ShaderArgs, I: ShaderArgs, P: ShaderArgs, O: ShaderArgs> ShaderParamSet<U, I, P, O> {
+    pub fn new() -> ShaderParamSet<U, I, P, O> {
+        ShaderParamSet {
+            phantom: PhantomData,
+        }
+    }
+}
+
+pub fn full_prototype<
+    U: ShaderArgs,
+    I: ShaderArgsClass<InterfaceArgs>,
+    P: ShaderArgsClass<TransparentArgs>,
+    O: ShaderArgsClass<InterfaceArgs>,
+    UB: BuiltInVars<U>,
+    IB: BuiltInVars<I>,
+    VertPB: BuiltInVars<P>,
+    FragPB: BuiltInVars<P>,
+    OB: BuiltInVars<O>,
+    UF: Fn(BuiltInUniforms) -> UB,
+    IF: Fn(BuiltInVertInputs) -> IB,
+    VPF: Fn(BuiltInVertOutputs) -> VertPB,
+    FPF: Fn(BuiltInFragInputs) -> FragPB,
+    OF: Fn(BuiltInFragOutputs) -> OB,
+>(
+    uniform_fn: UF,
+    input_fn: IF,
+    vertex_pass_fn: VPF,
+    fragment_pass_fn: FPF,
+    output_fn: OF,
+    set: ShaderParamSet<U, I, P, O>,
+) -> FullPrototype<U, I, P, O, UB, IB, VertPB, FragPB, OB> {
+    FullPrototype {
+        phantom: PhantomData,
+    }
+}
+
+pub mod builtin_vars {
+    use super::{ArgType, ShaderArgs};
+    use super::{Int, Float, Float2, Float3, Float4};
+    use crate::swizzle::{AttachBack, AttachFront, RemoveBack, RemoveFront};
+    use std::marker::PhantomData;
+
+    pub struct BuiltInVar<T: ArgType, N: VarName> {
+        phantom: PhantomData<(T, N)>,
+    }
+
+    impl<T: ArgType, N: VarName> BuiltInVar<T, N> {
+        pub(crate) fn new() -> BuiltInVar<T, N> {
+            BuiltInVar {
+                phantom: PhantomData,
+            }
+        }
+    }
+
+    pub unsafe trait VarName {
+        const NAME: &'static str;
+    }
+
+    struct Hidden;
+
+    pub struct VertexID {
+        hidden: Hidden,
+    }
+
+    pub struct InstanceID {
+        hidden: Hidden,
+    }
+
+    pub struct Position {
+        hidden: Hidden,
+    }
+
+    pub struct PointSize {
+        hidden: Hidden,
+    }
+
+    pub struct Depth {
+        hidden: Hidden,
+    }
+
+    pub struct FragCoord {
+        hidden: Hidden,
+    }
+
+    pub struct PointCoord {
+        hidden: Hidden,
+    }
+
+    unsafe impl VarName for VertexID {
+        const NAME: &'static str = "gl_VertexID";
+    }
+
+    unsafe impl VarName for InstanceID {
+        const NAME: &'static str = "gl_InstanceID";
+    }
+
+    unsafe impl VarName for Position {
+        const NAME: &'static str = "gl_Position";
+    }
+
+    unsafe impl VarName for PointSize {
+        const NAME: &'static str = "gl_PointSize";
+    }
+
+    unsafe impl VarName for Depth {
+        const NAME: &'static str = "gl_FragDepth";
+    }
+
+    unsafe impl VarName for FragCoord {
+        const NAME: &'static str = "gl_FragCoord";
+    }
+
+    unsafe impl VarName for PointCoord {
+        const NAME: &'static str = "gl_PointCoord";
+    }
+
+    pub struct BuiltInUniforms {}
+
+    pub struct BuiltInVertInputs {
+        pub vertex_id: BuiltInVar<Int, VertexID>,
+        pub instance_id: BuiltInVar<Int, InstanceID>,
+    }
+
+    pub struct BuiltInVertOutputs {
+        pub position: BuiltInVar<Float4, Position>,
+        pub point_size: BuiltInVar<Float4, PointSize>,
+    }
+
+    pub struct BuiltInFragInputs {
+        pub frag_coord: BuiltInVar<Float4, FragCoord>,
+        pub point_coord: BuiltInVar<Float2, PointCoord>,
+    }
+
+    pub struct BuiltInFragOutputs {
+        pub depth: BuiltInVar<Float, Depth>,
+    }
+
+    pub unsafe trait BuiltInVars<A> {
+        type Tuple: ShaderArgs;
+
+        const LEN: usize;
+
+        fn get_name(i: usize) -> &'static str;
+    }
+
+    pub struct RecursiveTuple<T, U> {
+        _t: T,
+        _u: U,
+    }
+
+    unsafe impl<T, A, F: ArgType, B: ArgType, FN: VarName, BN: VarName> BuiltInVars<A> for T
+    where
+        T: RemoveFront<Front = BuiltInVar<F, FN>>,
+        T: RemoveBack<Back = BuiltInVar<B, BN>>,
+        A: AttachFront<B>,
+        <T as RemoveFront>::Remaining: BuiltInVars<A>,
+        <T as RemoveBack>::Remaining: BuiltInVars<A::AttachFront>,
+        <<T as RemoveBack>::Remaining as BuiltInVars<A::AttachFront>>::Tuple: ShaderArgs,
+    {
+        type Tuple = <<T as RemoveBack>::Remaining as BuiltInVars<A::AttachFront>>::Tuple;
+
+        const LEN: usize = <T as RemoveBack>::Remaining::LEN + 1;
+
+        fn get_name(i: usize) -> &'static str {
+            if (i == 0) {
+                return FN::NAME;
+            }
+            <T as RemoveFront>::Remaining::get_name(i - 1)
+        }
+    }
+
+    unsafe impl<A: ShaderArgs> BuiltInVars<A> for () {
+        type Tuple = A;
+
+        const LEN: usize = 0;
+
+        fn get_name(i: usize) -> &'static str {
+            panic!("Name {} is out of bounds for this set of built in vars.", i);
+        }
     }
 }
 
@@ -247,8 +509,8 @@ pub fn create_program<
     POut: ShaderArgs,
     VOut: ShaderArgs,
     FIn: ShaderArgs,
-    Vert: Fn(PIn, PUniforms) -> VOut,
-    Frag: Fn(FIn, PUniforms) -> POut,
+    Vert: Fn(PIn, PUniforms) -> VOut + Sync,
+    Frag: Fn(FIn, PUniforms) -> POut + Sync,
     Proto: ProgramPrototype<Uniforms, PUniforms, In, PIn, Out, POut, VOut, FIn>,
 >(
     gl: &mut super::GlDraw,
@@ -302,32 +564,6 @@ pub fn create_program<
         program: program,
         phantom: PhantomData,
     }
-}
-
-mod builtin_vars {
-    pub const VERTEX_ID: &str = "gl_VertexID";
-    pub const INSTANCE_ID: &str = "gl_InstanceID";
-    pub const DRAW_ID: &str = "gl_DrawID";
-    pub const BASE_VERTEX: &str = "gl_BaseVertex";
-    pub const BASE_INSTANCE: &str = "gl_BaseInstance";
-
-    pub const POSITION: &str = "gl_Position";
-    pub const POINT_SIZE: &str = "gl_PointSize";
-    pub const CLIP_DISTANCE: &str = "gl_ClipDistance";
-
-    pub const COORD: &str = "gl_FragCoord";
-    pub const FRONT_FACING: &str = "gl_FrontFacing";
-    pub const POINT_COORD: &str = "gl_PointCoord";
-
-    pub const SAMPLE_ID: &str = "gl_SampleID";
-    pub const SAMPLE_POSITION: &str = "gl_SamplePosition";
-    pub const SAMPLE_MASK_IN: &str = "gl_SampleMaskIn";
-
-    pub const SAMPLE_MASK: &str = "gl_SampleMask";
-    pub const DEPTH: &str = "gl_FragDepth";
-
-    pub const DEPTH_PARAMS: &str = "gl_DepthRange";
-    pub const NUM_SAMPLES: &str = "gl_NumSamples";
 }
 
 #[cfg(not(feature = "opengl41"))]
@@ -527,7 +763,7 @@ pub mod swizzle {
 
         type Set;
 
-        const Arg: &'static str;
+        const ARG: &'static str;
     }
 
     pub unsafe trait SwizzleMask<T4, T3, T2, T1, S> {
@@ -548,7 +784,7 @@ pub mod swizzle {
 
     				type Set = $set;
 
-    				const Arg: &'static str = stringify!($vars);
+    				const ARG: &'static str = stringify!($vars);
     			}
     		)*
     	);
@@ -563,7 +799,7 @@ pub mod swizzle {
 
         	impl_swizzle!(;Vec4, Vec3, Vec2, Vec1,;$($vals,)*);
 
-        	swizzle_set!($set, $($vals),*;$($vars),*;sz::D, sz::C, sz::B, sz::A);
+        	swizzle_set!($set, $($vals),*;$($vars),*;sz::R3, sz::R2, sz::R1, sz::R0);
         )
     }
 
@@ -605,7 +841,7 @@ pub mod swizzle {
 
     macro_rules! concat_args {
     	($a0:ident, $($arg:ident,)*) => (
-    		format!("{}{}", $a0::Arg, concat_args!($($arg,)*));
+    		format!("{}{}", $a0::ARG, concat_args!($($arg,)*));
     	);
     	() => (
     		""
@@ -680,10 +916,10 @@ pub mod traits {
 				const NARGS: usize = $num;
 
 				unsafe fn create(names: fn(usize) -> VarType) -> Self {
-					let mut n = 0;
+					let n = 0;
 					$(
 						let $name = $name::create(format!("{}", names(n)));
-						n += 1;
+						let n = n + 1;
 					)*
 					($($name,)*)
 				}
@@ -718,7 +954,14 @@ pub mod traits {
         )
     }
 
-    args_set!(U1, U2, U3, U4, U5, U6, U7, U8, U9, U10, U11, U12, U13, U14, U15, U16, U17, U18, U19, U20,; 20);
+    #[cfg(feature = "longer_tuples")]
+    args_set!(U1, U2, U3, U4, U5, U6, U7, U8, U9, U10, U11, U12, U13, U14, U15, U16,
+     U17, U18, U19, U20, U21, U22, U23, U24, U25, U26, U27, U28, U29, U30, U31, U32,
+     U33, U34, U35, U36, U37, U38, U39, U40, U41, U42, U43, U44, U45, U46, U47, U48,
+     U49, U50, U51, U52, U53, U54, U55, U56, U57, U58, U59, U60, U61, U62, U63, U64,; 64);
+
+    #[cfg(not(feature = "longer_tuples"))]
+    args_set!(U1, U2, U3, U4, U5, U6, U7, U8, U9, U10, U11, U12, U13, U14, U15, U16,; 16);
 
     /*impl_shader_args! {; 0}
     impl_shader_args! {U1; 1 }

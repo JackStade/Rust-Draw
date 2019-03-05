@@ -26,3 +26,5 @@ opengl43 = ["opengl42"]
 opengl44 = ["opengl43"]
 opengl45 = ["opengl44"]
 opengl46 = ["opengl45"]
+
+longer_tuples = []
