@@ -6,6 +6,9 @@ use std::marker::PhantomData;
 use std::ops::{Add, Div, Mul};
 use std::ptr;
 use std::str;
+use std::rc::Rc;
+use std::cell::Cell;
+use std::collections::VecDeque;
 
 use super::gl;
 use super::gl::types::*;
@@ -67,165 +70,132 @@ void main() {
 // while the structures used for generating glsl code are purely
 // functional, glsl is not a functional language by any stretch of
 // the imagination. This type represents a glsl expression that has side
-// effects. Every glsl contains of list of the side effects that its represented
+// effects. Every glsl expression contains of list of the side effects that its represented
 // value depends on.
 //
 // each object has a seperate space of variable name ids, and stores a complete
-// list of neccesary dependencies. 
+// list of neccesary dependencies.
 // every side effect layer has a namespace that the next layer refers to
 // each layer also inherits the namespaces of previous layers.
 #[derive(Clone, PartialEq)]
 enum SideEffect {
-    // (type, var, assignment)
-    // note that the var here refers to the current
-    // side effect namespace, while in most other cases it refers to
-    Declaration(DataType, usize, String),
-    // (var, postfix, assignment)
-    Assignment(usize, String, String),
-    // (loop expression, vars, loop effects)
-    // a loop acts like a declaration, adding a number of variables to its
-    // level.
-    // 
-    Loop(LoopIter, Vec<String>, SideEffects),
+    Declaration(DataType, VarString),
+    Loop(LoopIter, Vec<VarExpr>),
 }
 
-// contains a list of layers, each layer holding a number of side effects
-struct SideEffects {
-    list: Vec<Vec<SideEffect>>,
-    // the maximum number of variables at each stage
-    max_var: Vec<usize>,
+struct VarBuilder {
+    strings: Vec<String>,
+    used_vars: usize,
+    var_prefix: &'static str,
 }
 
-// this function is hugely important to side effect processing.
-// it takes two effect lists and combines them
-fn merge_effects(s1: SideEffects, s2: SideEffects) -> SideEffects {
-    let l1 = s1.list.len();
-    let l2 = s2.list.len()
-    let len = cmp::max(l1, l2);
-    let mut max = vec![0; len];
-    for i in 0..l1 {
-        max[i] += s1.max_var[i];
+impl VarBuilder {
+    fn new(prefix: &'static str) -> VarBuilder {
+        VarBuilder {
+            strings: Vec::new(),
+            used_vars: 0,
+            var_prefix: prefix,
+        }
     }
-    for i in 0..l2 {
-        max[k] += s2.max_var[i];
-    }
-    let mut list = Vec::new();
-    for i in 0..len {
 
+    fn add(&mut self, string: &VarString) -> usize {
+        let mut string_pos = 0;
+        let mut s = String::new();
+        for (pos, ref var) in &string.vars {
+            let var_pos = if var.key.get().is_none() {
+                let v = self.add(&var.var);
+                var.key.set(Some(v));
+                v
+            } else {
+                var.key.get().unwrap()
+            };
+            s = format!("{}{}{}{}", s, &string.string[string_pos..*pos], self.var_prefix, var_pos);
+            string_pos = *pos;
+        }
+        s = format!("{}{}", s, &string.string[string_pos..]);
+        let l = self.strings.len();
+        self.strings.push(s);
+        l
     }
 }
 
-fn merge_layer(mut v1: Vec<SideEffect>, v2: Vec<SideEffect>) -> Vec<SideEffect> {
-    while let Some(s) = v2.pop() {
-        match s {
-            // control flow statements can't be compared in the same way
-            // as simpler statements
-            SideEffect::Loop(iter, vars, effects) => {
-                let mut found = None;
-                for i in 0..v1.len() {
-                    if let ref SideEffect::Loop(iter, v2, e2) = &v1[i] {
-                        found = Some(i);
-                        break;
-                    }
-                }
-                if let Some(i) = found {
-                    let l = v1.swap_remove(i);
-                    if let SideEffect::Loop(iter, v2, e2) = l {
-                        let nvars = merge_vec(vars, v2);
-                        let ne = merge_effects(effects, e2);
-                        v1.push(SideEffect::Loop(iter, var, effects));
-                    } else {
-                        unreachable!();
-                    }
-                } else {
-                    v1.push(SideEffect::Loop(iter, var, effects));
-                }
-            },
-            s => {
-                let mut found = None;
-                for i in 0..v1.len() {
-                    if v1[i] == s {
-                        found = Some(i);
-                        break;
-                    }
-                }
-                if let None = found {
-                    v1.push(s);
-                }
+#[derive(Clone, PartialEq)]
+struct VarExpr {
+    var: VarString,
+    key: Cell<Option<usize>>,
+}
+
+// A varstring is a type that is used interally for building a graph for the shader.
+#[derive(Clone, PartialEq)]
+pub struct VarString {
+    string: String,
+    // each value holds the position in the string and the name of the var
+    // these are expected to be sorted
+    vars: Vec<(usize, Rc<VarExpr>)>,
+}
+
+impl VarString {
+    fn new<S: fmt::Display>(string: S) -> VarString {
+        VarString {
+            string: format!("{}", string),
+            vars: Vec::new(),
+        }
+    }
+
+    fn format(formatter: &str, strings: Vec<VarString>) -> VarString {
+        let mut frags = formatter.split("$");
+        let mut string = if let Some(frag) = frags.next() {
+            format!("{}", frag)
+        } else {
+            String::new()
+        };
+        let mut vars = Vec::with_capacity(strings.len());
+        let mut dq = VecDeque::from(strings);
+        while let Some(frag) = frags.next() {
+            let s = dq.pop_front().unwrap();
+            let mut dq2 = VecDeque::from(s.vars);
+            while let Some(var) = dq2.pop_front() {
+                vars.push((var.0 + string.len(), var.1));
             }
+            string = format!("{}{}{}", string, s.string, frag);
+        }
+        VarString {
+            string: string,
+            vars: vars,
         }
     }
 }
 
-fn merge_vec<T: PartialEq>(mut v1: Vec<T>, v2: Vec<T>) -> Vec<T> {
-    while let Some(v) = v2.pop() {
-        let mut found = None;
-        for i in 0..v1.len() {
-            if ref v1[i] == &v {
-                found = Some(i);
-                break;
-            }
-            if let None = found {
-                v1.push(v);
+macro_rules! var_format {
+    ($fmt:expr) => (
+        VarString::new($fmt)
+    );
+    ($f0:expr, $($fmts:expr),*; $($string:expr),*) => (
+        {
+            let mut string = format!("{}", $f0);
+            let mut vars = Vec::new();
+            $(
+                let s = $string;
+                let mut dq = VecDeque::from(s.vars);
+                while let Some(var) = dq.pop_front() {
+                    vars.push((var.0 + string.len(), var.1));
+                }
+                string = format!("{}{}{}", string, s.string, $fmts);
+            )*
+            VarString {
+                string: string,
+                vars: vars,
             }
         }
-    }
-    v1
+    )
 }
 
 // represents the main body of a glsl loop
 #[derive(Clone, PartialEq)]
 struct LoopIter {
     ty: DataType,
-    // the values of these strings are dependent on the previous layer
-    start: String,
-    end: String,
-    incr: String,
-}
-
-impl LoopIter {
-    fn fix<F: Fn(usize) -> T, T: fmt::Display>(self, fix: &F) -> LoopIter {
-        LoopIter {
-            ty: self.DataType,
-            start: fix_string(self.start, fix),
-            end: fix_string(self.start, fix),
-            incr: fix_string(self.incr, fix),
-        }
-    }
-}
-
-impl SideEffect {
-    // writes the var names from the previous layer into this layer, allowing 
-    // `equals` to function properly
-    fn fix<F: Fn(usize) -> T, T: fmt::Display>(self, fix: &F) -> SideEffectType {
-        match self {
-            SideEffectType::Declaration(ty, var, assign) => {
-                SideEffectType::Declaration(ty, var, fix_string(assign, vars))
-            },
-            SideEffectType::Assignment(var, pfix, assign) => {
-                SideEffectType::Assignment(var, pfix, fix_string(assign, vars))
-            }
-            _ => (unimplemented!())
-        }
-    }
-}
-
-// used to convert between namespaces
-fn fix_string<F: Fn(usize) -> T, T: fmt::Display>(string: String, fix: &F) -> String {
-    let mut s = String::new();
-    let mut frags = string.split('$');
-    loop {
-        match (frags.next(), frags.next()) {
-            (Some(st), Some(n)) => {
-                s = format!("{}{}{}", s, st, fix(n.parse::<usize>().unwrap()));
-            }
-            (Some(st), None) => {
-                s = format!("{}{}", s, st);
-            }
-            _ => break,
-        }
-    }
-    s
+    // test is a repeat check dependent on the variables in the loop
+    test: VarString,
 }
 
 /// Represents a glsl data type.
@@ -239,6 +209,10 @@ pub enum DataType {
     Int2,
     Int3,
     Int4,
+    Boolean,
+    Boolean2,
+    Boolean3,
+    Boolean4,
     Mat2,
     Mat3,
     Mat4,
@@ -255,6 +229,10 @@ impl DataType {
             DataType::Int2 => "ivec2",
             DataType::Int3 => "ivec3",
             DataType::Int4 => "ivec4",
+            DataType::Boolean => "bool",
+            DataType::Boolean2 => "bvec2",
+            DataType::Boolean3 => "bvec3",
+            DataType::Boolean4 => "bvec4",
             DataType::Mat2 => "mat2",
             DataType::Mat3 => "mat3",
             DataType::Mat4 => "mat4",
@@ -265,7 +243,7 @@ impl DataType {
 /// This needs to be public because it is used by a function of
 /// the ShaderArgs trait.
 pub struct ShaderArgDataList {
-    args: Vec<(DataType, String)>,
+    args: Vec<(DataType, VarString)>,
 }
 
 /// Another type that annoyingly needs to be public.
@@ -857,7 +835,9 @@ fn create_shader_string<
     let uniform_type = unsafe { Uniforms::create(output_names) };
     let out = generator(in_type, uniform_type).map_data_args().args;
     shader = format!("{}\n\nvoid main() {{\n", shader);
+    let mut builder = VarBuilder::new("var");
     for i in 0..out.len() {
+        builder.add(&out[i].1);
         shader = format!("{}   {} = {};\n", shader, output_names(i), out[i].1);
     }
     shader = format!("{}}}\n", shader);
@@ -1053,16 +1033,16 @@ pub mod swizzle {
 }
 
 pub mod traits {
-    use super::{DataType, ShaderArgDataList, ShaderArgList, VarType};
+    use super::{DataType, ShaderArgDataList, ShaderArgList, VarType, VarString};
     pub use super::{Float2Arg, Float3Arg, Float4Arg, FloatArg};
 
     pub unsafe trait ArgType {
         /// Do not call this function.
-        unsafe fn create(data: String) -> Self;
+        unsafe fn create(data: VarString) -> Self;
 
         fn data_type() -> DataType;
 
-        fn as_shader_data(self) -> String;
+        fn as_shader_data(self) -> VarString;
     }
 
     pub unsafe trait ArgClass {}
@@ -1113,7 +1093,7 @@ pub mod traits {
 				unsafe fn create(names: fn(usize) -> VarType) -> Self {
 					let n = 0;
 					$(
-						let $name = $name::create(format!("{}", names(n)));
+						let $name = $name::create(VarString::new(names(n)));
 						let n = n + 1;
 					)*
 					($($name,)*)
@@ -1177,7 +1157,7 @@ macro_rules! vec_ops_reverse {
 
             fn mul(self, rhs: last!($($sub,)*)) -> $vec_type {
                 $vec_type {
-                    data: format!("({} * {})", self.data, rhs.data),
+                    data: var_format!("(", " * ", ")"; self.data, rhs.data),
                 }
             }
         }
@@ -1188,7 +1168,7 @@ macro_rules! vec_type {
     ($vec:ident, $vec_type:ident, $trait:ident, $data:expr, $($sub:ident,)*) => (
     	#[derive(Clone)]
         pub struct $vec_type {
-            data: String,
+            data: VarString,
         }
 
         impl Mul<$vec_type> for last!($($sub,)*) {
@@ -1196,7 +1176,7 @@ macro_rules! vec_type {
 
             fn mul(self, rhs: $vec_type) -> $vec_type {
                 $vec_type {
-                    data: format!("({} * {})", self.data, rhs.data),
+                    data: var_format!("(", " * ", ")"; self.data, rhs.data),
                 }
             }
         }
@@ -1206,7 +1186,7 @@ macro_rules! vec_type {
 
             fn div(self, rhs: last!($($sub,)*)) -> $vec_type {
                 $vec_type {
-                    data: format!("({} / {})", self.data, rhs.data),
+                    data: var_format!("($", " / ", " $)"; self.data, rhs.data),
                 }
             }
         }
@@ -1218,7 +1198,7 @@ macro_rules! vec_type {
 
         	fn add(self, rhs: $vec_type) -> $vec_type {
         		$vec_type {
-        			data: format!("({} + {})", self.data, rhs.data),
+        			data: var_format!("(", " + ", ")"; self.data, rhs.data),
         		}
         	}
         }
@@ -1232,7 +1212,7 @@ macro_rules! vec_type {
         }
 
         unsafe impl ArgType for $vec_type {
-        	unsafe fn create(data: String) -> Self {
+        	unsafe fn create(data: VarString) -> Self {
         		$vec_type {
         			data: data,
         		}
@@ -1242,7 +1222,7 @@ macro_rules! vec_type {
         		$data
         	}
 
-        	fn as_shader_data(self) -> String {
+        	fn as_shader_data(self) -> VarString {
         		self.data
         	}
         }
@@ -1261,8 +1241,8 @@ macro_rules! subs {
 			fn $vec(self) -> $vec_type {
 				match_from!(self, $($start,)*;u1, u2, u3, u4,;);
 				$vec_type {
-					data: format!("{}({})",
-						$vec_type::data_type().gl_type(), concat_enough!($($start,)* ; u1, u2, u3, u4,;)),
+					data: var_format!("", "(", ")"; VarString::new($vec_type::data_type().gl_type()), 
+                        concat_enough!($($start,)* ; u1, u2, u3, u4,;)),
 				}
 			}
 		}
@@ -1284,11 +1264,20 @@ macro_rules! match_from {
 
 macro_rules! concat_enough {
 	(; $($vals:ident,)* ; $($build:ident,)*) => (
-		concat!($($build.as_shader_data(),)*);
+		concat_var!($($build.as_shader_data(),)*);
 	);
 	($t1:ident, $($try:ident,)* ; $v1:ident, $($vals:ident,)* ; $($build:ident,)*) => (
 		concat_enough!($($try,)* ; $($vals,)* ; $($build,)*$v1,);
 	)
+}
+
+macro_rules! concat_var {
+    ($e:expr,) => (
+        $e
+    );
+    ($e:expr, $($es:expr,)+) => (
+        var_format!("", ", ", ""; $e, concat_var!($($es,)+))
+    );
 }
 
 macro_rules! concat {
@@ -1340,7 +1329,7 @@ macro_rules! vec_swizzle {
             /// single item types when version >= opengl4.2.
             pub fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(self, mask: T) -> T::Out {
                 unsafe {
-                    T::Out::create(format!("{}.{}", self.data, T::get_vars()))
+                    T::Out::create(var_format!("", ".", ""; self.data, VarString::new(T::get_vars())))
                 }
             }
         }
@@ -1350,7 +1339,7 @@ macro_rules! vec_swizzle {
             /// Applies a swizzle mask to the vector type.
 			pub fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(self, mask: T) -> T::Out {
 				unsafe {
-					T::Out::create(format!("{}.{}", self.data, T::get_vars()))
+					T::Out::create(var_format!("", ".", ""; self.data, VarString::new(T::get_vars())))
 				}
 			}
 		}
@@ -1369,8 +1358,8 @@ macro_rules! vec_litteral {
             fn $f0(self) -> $v0 {
                 let tup!($f0,$($f,)*) = self;
                 $v0 {
-                    data: format!("{}({})", $v0::data_type().gl_type(),
-                        concat!(format!("{}{}", $f0, $tag),$(format!("{}{}", $f, $tag),)*)),
+                    data: var_format!("", "(", ")"; VarString::new($v0::data_type().gl_type()),
+                        VarString::new(concat!(format!("{}{}", $f0, $tag),$(format!("{}{}", $f, $tag),)*))),
                 }
             }
         }
@@ -1419,10 +1408,14 @@ create_vec!(i32, "", Int4, Int3, Int2, Int;
     int4, int3, int2, int;
     Int4Arg, Int3Arg, Int2Arg, IntArg);
 
+create_vec!(bool, "", Boolean4, Boolean3, Boolean2, Boolean;
+    boolean4, boolean3, boolean2, boolean;
+    Bool4Arg,  Bool3Arg, Bool2Arg, BoolArg);
+
 unsafe impl FloatArg for Int {
     fn float(self) -> Float {
         Float {
-            data: format!("float({})", self.data),
+            data: var_format!("float(", ")"; self.data),
         }
     }
 }
