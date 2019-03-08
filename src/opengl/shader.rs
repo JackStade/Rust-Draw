@@ -1,14 +1,14 @@
 use self::traits::*;
+use std::cell::Cell;
 use std::cmp;
+use std::collections::VecDeque;
 use std::ffi::CString;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Add, Div, Mul};
 use std::ptr;
-use std::str;
 use std::rc::Rc;
-use std::cell::Cell;
-use std::collections::VecDeque;
+use std::str;
 
 use super::gl;
 use super::gl::types::*;
@@ -98,31 +98,69 @@ impl VarBuilder {
         }
     }
 
-    fn add(&mut self, string: &VarString) -> usize {
+    fn add(&mut self, expr: &VarExpr) -> usize {
+        let mut s = self.format_var(&expr.var);
+        let var_pos = self.used_vars;
+        s = format!(
+            "   {} {}{} = {};\n",
+            expr.ty.gl_type(),
+            self.var_prefix,
+            var_pos,
+            s
+        );
+        self.strings.push(s);
+        self.used_vars += 1;
+        var_pos
+    }
+
+    fn add_strings(&self, mut start: String) -> String {
+        for s in &self.strings {
+            start = format!("{}{}", start, s);
+        }
+        start
+    }
+
+    fn format_var(&mut self, string: &VarString) -> String {
         let mut string_pos = 0;
         let mut s = String::new();
         for (pos, ref var) in &string.vars {
             let var_pos = if var.key.get().is_none() {
-                let v = self.add(&var.var);
+                let v = self.add(&var);
                 var.key.set(Some(v));
                 v
             } else {
                 var.key.get().unwrap()
             };
-            s = format!("{}{}{}{}", s, &string.string[string_pos..*pos], self.var_prefix, var_pos);
+            s = format!(
+                "{}{}{}{}",
+                s,
+                &string.string[string_pos..*pos],
+                self.var_prefix,
+                var_pos
+            );
             string_pos = *pos;
         }
         s = format!("{}{}", s, &string.string[string_pos..]);
-        let l = self.strings.len();
-        self.strings.push(s);
-        l
+        s
     }
 }
 
+// Represents a variable declarartion.
 #[derive(Clone, PartialEq)]
 struct VarExpr {
     var: VarString,
+    ty: DataType,
     key: Cell<Option<usize>>,
+}
+
+impl VarExpr {
+    fn new(var: VarString, ty: DataType) -> VarExpr {
+        VarExpr {
+            var: var,
+            ty: ty,
+            key: Cell::new(None),
+        }
+    }
 }
 
 // A varstring is a type that is used interally for building a graph for the shader.
@@ -139,6 +177,13 @@ impl VarString {
         VarString {
             string: format!("{}", string),
             vars: Vec::new(),
+        }
+    }
+
+    fn from_expr(expr: VarExpr) -> VarString {
+        VarString {
+            string: String::new(),
+            vars: vec![(0, Rc::new(expr))],
         }
     }
 
@@ -836,9 +881,13 @@ fn create_shader_string<
     let out = generator(in_type, uniform_type).map_data_args().args;
     shader = format!("{}\n\nvoid main() {{\n", shader);
     let mut builder = VarBuilder::new("var");
+    let mut out_strings = Vec::with_capacity(out.len());
     for i in 0..out.len() {
-        builder.add(&out[i].1);
-        shader = format!("{}   {} = {};\n", shader, output_names(i), out[i].1);
+        out_strings.push(builder.format_var(&out[i].1));
+    }
+    shader = builder.add_strings(shader);
+    for i in 0..out.len() {
+        shader = format!("{}   {} = {};\n", shader, output_names(i), out_strings[i]);
     }
     shader = format!("{}}}\n", shader);
     println!("{}\n", shader);
@@ -1033,10 +1082,10 @@ pub mod swizzle {
 }
 
 pub mod traits {
-    use super::{DataType, ShaderArgDataList, ShaderArgList, VarType, VarString};
+    use super::{DataType, ShaderArgDataList, ShaderArgList, VarExpr, VarString, VarType};
     pub use super::{Float2Arg, Float3Arg, Float4Arg, FloatArg};
 
-    pub unsafe trait ArgType {
+    pub unsafe trait ArgType: Sized {
         /// Do not call this function.
         unsafe fn create(data: VarString) -> Self;
 
@@ -1131,20 +1180,12 @@ pub mod traits {
 
     #[cfg(feature = "longer_tuples")]
     args_set!(U1, U2, U3, U4, U5, U6, U7, U8, U9, U10, U11, U12, U13, U14, U15, U16,
-     U17, U18, U19, U20, U21, U22, U23, U24, U25, U26, U27, U28, U29, U30, U31, U32,
-     U33, U34, U35, U36, U37, U38, U39, U40, U41, U42, U43, U44, U45, U46, U47, U48,
-     U49, U50, U51, U52, U53, U54, U55, U56, U57, U58, U59, U60, U61, U62, U63, U64,; 64);
+        U17, U18, U19, U20, U21, U22, U23, U24, U25, U26, U27, U28, U29, U30, U31, U32,
+        U33, U34, U35, U36, U37, U38, U39, U40, U41, U42, U43, U44, U45, U46, U47, U48,
+        U49, U50, U51, U52, U53, U54, U55, U56, U57, U58, U59, U60, U61, U62, U63, U64,; 64);
 
     #[cfg(not(feature = "longer_tuples"))]
     args_set!(U1, U2, U3, U4, U5, U6, U7, U8, U9, U10, U11, U12, U13, U14, U15, U16,; 16);
-
-    /*impl_shader_args! {; 0}
-    impl_shader_args! {U1; 1 }
-    impl_shader_args! {U1, U2; 2}
-    impl_shader_args! {U1, U2, U3; 3}
-    impl_shader_args! {U1, U2, U3, U4; 4}
-    impl_shader_args! {U1, U2, U3, U4, U5; 5}
-    impl_shader_args! {U1, U2, U3, U4, U5, U6; 6}*/
 }
 
 // the complement of implementations for certain vec ops. Need to
@@ -1241,7 +1282,7 @@ macro_rules! subs {
 			fn $vec(self) -> $vec_type {
 				match_from!(self, $($start,)*;u1, u2, u3, u4,;);
 				$vec_type {
-					data: var_format!("", "(", ")"; VarString::new($vec_type::data_type().gl_type()), 
+					data: var_format!("", "(", ")"; VarString::new($vec_type::data_type().gl_type()),
                         concat_enough!($($start,)* ; u1, u2, u3, u4,;)),
 				}
 			}
