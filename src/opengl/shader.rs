@@ -1082,12 +1082,12 @@ pub mod swizzle {
 }
 
 pub mod traits {
-    use super::{DataType, ShaderArgDataList, ShaderArgList, VarExpr, VarString, VarType};
+    use super::{DataType, ShaderArgDataList, ShaderArgList, VarExpr, VarString, VarType, ItemRef};
     pub use super::{Float2Arg, Float3Arg, Float4Arg, FloatArg};
 
     pub unsafe trait ArgType: Sized {
         /// Do not call this function.
-        unsafe fn create(data: VarString) -> Self;
+        unsafe fn create(data: VarString, r: ItemRef) -> Self;
 
         fn data_type() -> DataType;
 
@@ -1142,7 +1142,7 @@ pub mod traits {
 				unsafe fn create(names: fn(usize) -> VarType) -> Self {
 					let n = 0;
 					$(
-						let $name = $name::create(VarString::new(names(n)));
+						let $name = $name::create(VarString::new(names(n)), ItemRef::Static);
 						let n = n + 1;
 					)*
 					($($name,)*)
@@ -1188,6 +1188,76 @@ pub mod traits {
     args_set!(U1, U2, U3, U4, U5, U6, U7, U8, U9, U10, U11, U12, U13, U14, U15, U16,; 16);
 }
 
+#[derive(Clone, Copy)]
+pub enum ItemRef {
+    // used for variable names and shader inputs
+    Static,
+    // an expression based on other variables
+    Expr,
+    // a reference to a single variable
+    Var,
+}
+
+use ItemRef::{Static, Expr, Var};
+
+struct ProgramItem {
+    data: Cell<VarString>,
+    ref_type: Cell<ItemRef>,
+    ty: DataType,
+}
+
+impl ProgramItem {
+    fn create(data: VarString, ty: DataType) -> ProgramItem {
+        ProgramItem {
+            data: Cell::new(data),
+            ref_type: Cell::new(Static),
+            ty: ty,
+        }
+    }
+
+    fn new(data: VarString, ty: DataType, r: ItemRef) -> ProgramItem {
+        ProgramItem {
+            data: Cell::new(data),
+            ref_type: Cell::new(r),
+            ty: ty,
+        }
+    }
+}
+
+impl Clone for ProgramItem {
+    fn clone(&self) -> ProgramItem {
+        let ref_type = self.ref_type.get();
+        let expression = self.data.replace(VarString::new(""));
+        match ref_type {
+            Expr => {
+                let string = VarString::from_expr(VarExpr::new(expression, self.ty));
+                self.data.set(string.clone());
+                ProgramItem {
+                    data: Cell::new(string),
+                    ref_type: Cell::new(Var),
+                    ty: self.ty,
+                }
+            }
+            Static => {
+                self.data.set(expression.clone());
+                ProgramItem {
+                    data: Cell::new(expression),
+                    ref_type: Cell::new(Static),
+                    ty: self.ty,
+                }
+            }
+            Var => {
+                self.data.set(expression.clone());
+                ProgramItem {
+                    data: Cell::new(expression),
+                    ref_type: Cell::new(Var),
+                    ty: self.ty,
+                }
+            }
+        }
+    }
+}
+
 // the complement of implementations for certain vec ops. Need to
 // be careful not to redefine.
 macro_rules! vec_ops_reverse {
@@ -1197,9 +1267,8 @@ macro_rules! vec_ops_reverse {
             type Output = $vec_type;
 
             fn mul(self, rhs: last!($($sub,)*)) -> $vec_type {
-                $vec_type {
-                    data: var_format!("(", " * ", ")"; self.data, rhs.data),
-                }
+                let (l, r) = (self.data.data.into_inner(), rhs.data.data.into_inner());
+                $vec_type::new(var_format!("(", " * ", ")"; l, r), Expr)
             }
         }
     )
@@ -1209,16 +1278,29 @@ macro_rules! vec_type {
     ($vec:ident, $vec_type:ident, $trait:ident, $data:expr, $($sub:ident,)*) => (
     	#[derive(Clone)]
         pub struct $vec_type {
-            data: VarString,
+            data: ProgramItem,
+        }
+
+        impl $vec_type {
+            fn new_static(data: VarString) -> $vec_type {
+                $vec_type {
+                    data: ProgramItem::new(data, $data, Static),
+                }
+            }
+
+            fn new(data: VarString, r: ItemRef) -> $vec_type {
+                $vec_type {
+                    data: ProgramItem::new(data, $data, r),
+                }
+            }
         }
 
         impl Mul<$vec_type> for last!($($sub,)*) {
             type Output = $vec_type;
 
             fn mul(self, rhs: $vec_type) -> $vec_type {
-                $vec_type {
-                    data: var_format!("(", " * ", ")"; self.data, rhs.data),
-                }
+                let (l, r) = (self.data.data.into_inner(), rhs.data.data.into_inner());
+                $vec_type::new(var_format!("(", " * ", ")"; l, r), Expr)
             }
         }
 
@@ -1226,9 +1308,8 @@ macro_rules! vec_type {
             type Output = $vec_type;
 
             fn div(self, rhs: last!($($sub,)*)) -> $vec_type {
-                $vec_type {
-                    data: var_format!("($", " / ", " $)"; self.data, rhs.data),
-                }
+                let (l, r) = (self.data.data.into_inner(), rhs.data.data.into_inner());
+                $vec_type::new(var_format!("(", " / ", ")"; l, r), Expr)
             }
         }
 
@@ -1238,9 +1319,8 @@ macro_rules! vec_type {
         	type Output = $vec_type;
 
         	fn add(self, rhs: $vec_type) -> $vec_type {
-        		$vec_type {
-        			data: var_format!("(", " + ", ")"; self.data, rhs.data),
-        		}
+        		let (l, r) = (self.data.data.into_inner(), rhs.data.data.into_inner());
+                $vec_type::new(var_format!("(", " + ", ")"; l, r), Expr)
         	}
         }
 
@@ -1253,9 +1333,13 @@ macro_rules! vec_type {
         }
 
         unsafe impl ArgType for $vec_type {
-        	unsafe fn create(data: VarString) -> Self {
+        	unsafe fn create(data: VarString, r: ItemRef) -> Self {
         		$vec_type {
-        			data: data,
+        			data: ProgramItem {
+                        data: Cell::new(data),
+                        ref_type: Cell::new(r),
+                        ty: $data,
+                    }
         		}
         	}
 
@@ -1264,7 +1348,7 @@ macro_rules! vec_type {
         	}
 
         	fn as_shader_data(self) -> VarString {
-        		self.data
+        		self.data.data.into_inner()
         	}
         }
 
@@ -1281,10 +1365,8 @@ macro_rules! subs {
 		unsafe impl $trait for ($($start),*) {
 			fn $vec(self) -> $vec_type {
 				match_from!(self, $($start,)*;u1, u2, u3, u4,;);
-				$vec_type {
-					data: var_format!("", "(", ")"; VarString::new($vec_type::data_type().gl_type()),
-                        concat_enough!($($start,)* ; u1, u2, u3, u4,;)),
-				}
+                $vec_type::new(var_format!("", "(", ")"; VarString::new($vec_type::data_type().gl_type()),
+                        concat_enough!($($start,)* ; u1, u2, u3, u4,;)), Expr)
 			}
 		}
 	);
@@ -1370,7 +1452,7 @@ macro_rules! vec_swizzle {
             /// single item types when version >= opengl4.2.
             pub fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(self, mask: T) -> T::Out {
                 unsafe {
-                    T::Out::create(var_format!("", ".", ""; self.data, VarString::new(T::get_vars())))
+                    T::Out::create(var_format!("", ".", ""; self.data.data.into_inner(), VarString::new(T::get_vars())), Expr)
                 }
             }
         }
@@ -1380,7 +1462,7 @@ macro_rules! vec_swizzle {
             /// Applies a swizzle mask to the vector type.
 			pub fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(self, mask: T) -> T::Out {
 				unsafe {
-					T::Out::create(var_format!("", ".", ""; self.data, VarString::new(T::get_vars())))
+					T::Out::create(var_format!("", ".", ""; self.data.data.into_inner(), VarString::new(T::get_vars())), Expr)
 				}
 			}
 		}
@@ -1398,10 +1480,8 @@ macro_rules! vec_litteral {
         unsafe impl $a0 for tup!($t0,$($t,)*) {
             fn $f0(self) -> $v0 {
                 let tup!($f0,$($f,)*) = self;
-                $v0 {
-                    data: var_format!("", "(", ")"; VarString::new($v0::data_type().gl_type()),
-                        VarString::new(concat!(format!("{}{}", $f0, $tag),$(format!("{}{}", $f, $tag),)*))),
-                }
+                $v0::new(var_format!("", "(", ")"; VarString::new($v0::data_type().gl_type()),
+                        VarString::new(concat!(format!("{}{}", $f0, $tag),$(format!("{}{}", $f, $tag),)*))), Expr)
             }
         }
 
@@ -1455,8 +1535,6 @@ create_vec!(bool, "", Boolean4, Boolean3, Boolean2, Boolean;
 
 unsafe impl FloatArg for Int {
     fn float(self) -> Float {
-        Float {
-            data: var_format!("float(", ")"; self.data),
-        }
+        Float::new(var_format!("float(", ")"; self.data.data.into_inner()), Expr)
     }
 }
