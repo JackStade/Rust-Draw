@@ -13,7 +13,7 @@ pub mod swizzle;
 
 use nalgebra as na;
 use opengl::shader;
-use shader::traits::*;
+use shader::api::*;
 use std::time::{Duration, Instant};
 use swizzle::SwizzleInPlace;
 
@@ -30,9 +30,7 @@ pub fn test_window() {
         &mut gl,
         &proto,
         |input, _| (shader::float4((input.0, shader::float(1.0))), input.1),
-        |input, _| {
-            (input.0.clone().map((shader::swizzle::Y,)), input.0)
-        },
+        |input, _| (input.0.clone().map((shader::swizzle::Y,)), input.0),
     );
 
     let mut tex = Vec::with_capacity(4 * 128 * 128);

@@ -1081,17 +1081,235 @@ pub mod swizzle {
     swizzle_set!(STPQ, Q, P, T, S; q, p, t, s);
 }
 
-pub mod traits {
-    use super::{DataType, ShaderArgDataList, ShaderArgList, VarExpr, VarString, VarType, ItemRef};
+pub mod api {
     pub use super::{Float2Arg, Float3Arg, Float4Arg, FloatArg};
+}
 
-    pub unsafe trait ArgType: Sized {
+pub mod traits {
+    use super::{DataType, ItemRef, ShaderArgDataList, ShaderArgList, VarExpr, VarString, VarType};
+    use std::ops::{Add, Div, Mul, Neg, Sub};
+
+    pub unsafe trait ArgType {
         /// Do not call this function.
         unsafe fn create(data: VarString, r: ItemRef) -> Self;
 
         fn data_type() -> DataType;
 
         fn as_shader_data(self) -> VarString;
+    }
+
+    pub unsafe trait ExprType<T: ArgType> {
+        unsafe fn into_t(self) -> T;
+
+        unsafe fn from_t(t: T) -> Self;
+    }
+
+    pub trait IntoArg {
+        type Arg: ArgType;
+
+        unsafe fn into_arg(self) -> Self::Arg;
+    }
+
+    pub trait IntoArgs {
+        type Args: ShaderArgs;
+
+        unsafe fn into_args(self) -> Self::Args;
+    }
+
+    pub trait IntoConstant<T: ArgType> {
+        fn into_constant(self) -> Constant<T>;
+    }
+
+    pub trait IntoUniform<T: ArgType> {
+        fn into_uniform(self) -> Uniform<T>;
+    }
+
+    pub trait IntoVarying<T: ArgType> {
+        fn into_varying(self) -> Varying<T>;
+    }
+
+    macro_rules! wrapper_ops {
+        ($op:ident, $op_func:ident) => {
+            wrapper_impls!($op, $op_func, Constant, Constant, Constant);
+            wrapper_impls!($op, $op_func, Constant, Uniform, Uniform);
+            wrapper_impls!($op, $op_func, Uniform, Constant, Uniform);
+            wrapper_impls!($op, $op_func, Uniform, Uniform, Uniform);
+            wrapper_impls!($op, $op_func, Constant, Varying, Varying);
+            wrapper_impls!($op, $op_func, Varying, Constant, Varying);
+            wrapper_impls!($op, $op_func, Uniform, Varying, Varying);
+            wrapper_impls!($op, $op_func, Varying, Uniform, Varying);
+            wrapper_impls!($op, $op_func, Varying, Varying, Varying);
+        };
+    }
+
+    macro_rules! wrapper_impls {
+        ($op:ident, $op_func:ident, $l:ident, $r:ident, $o:ident) => {
+            impl<O: ArgType, L: ArgType + Add<R, Output = O>, R: ArgType> $op<$r<R>> for $l<L> {
+                type Output = $o<O>;
+
+                fn $op_func(self, rhs: $r<R>) -> $o<O> {
+                    $o {
+                        arg: self.arg + rhs.arg,
+                    }
+                }
+            }
+
+            impl<O: ArgType, L: ArgType + Add<R, Output = O> + Clone, R: ArgType> $op<$r<R>>
+                for &$l<L>
+            {
+                type Output = $o<O>;
+
+                fn $op_func(self, rhs: $r<R>) -> $o<O> {
+                    $o {
+                        arg: self.clone().arg + rhs.arg,
+                    }
+                }
+            }
+
+            impl<O: ArgType, L: ArgType + Add<R, Output = O>, R: ArgType + Clone> $op<&$r<R>>
+                for $l<L>
+            {
+                type Output = $o<O>;
+
+                fn $op_func(self, rhs: &$r<R>) -> $o<O> {
+                    $o {
+                        arg: self.arg + rhs.clone().arg,
+                    }
+                }
+            }
+
+            impl<O: ArgType, L: ArgType + Add<R, Output = O> + Clone, R: ArgType + Clone>
+                $op<&$r<R>> for &$l<L>
+            {
+                type Output = $o<O>;
+
+                fn $op_func(self, rhs: &$r<R>) -> $o<O> {
+                    $o {
+                        arg: self.clone().arg + rhs.clone().arg,
+                    }
+                }
+            }
+        };
+    }
+
+    wrapper_ops!(Add, add);
+    wrapper_ops!(Sub, sub);
+    wrapper_ops!(Mul, mul);
+    wrapper_ops!(Div, div);
+
+    impl<T: ArgType> IntoConstant<T> for T {
+        fn into_constant(self) -> Constant<T> {
+            Constant { arg: self }
+        }
+    }
+
+    impl<T: ArgType> IntoUniform<T> for T {
+        fn into_uniform(self) -> Uniform<T> {
+            Uniform { arg: self }
+        }
+    }
+
+    impl<T: ArgType> IntoVarying<T> for T {
+        fn into_varying(self) -> Varying<T> {
+            Varying { arg: self }
+        }
+    }
+
+    pub trait ExprCombine<T: ArgType> {
+        type Min: ExprType<T> + ExprCombine<T>;
+    }
+
+    impl<T: ArgType, S: ArgType> ExprCombine<T> for Constant<S> {
+        type Min = Constant<T>;
+    }
+
+    impl<T: ArgType, S: ArgType> ExprCombine<T> for Uniform<S> {
+        type Min = Uniform<T>;
+    }
+
+    impl<T: ArgType, S: ArgType> ExprCombine<T> for Varying<S> {
+        type Min = Varying<T>;
+    }
+
+    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Constant<L>, Constant<R>) {
+        type Min = Constant<T>;
+    }
+
+    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Uniform<L>, Constant<R>) {
+        type Min = Uniform<T>;
+    }
+
+    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Constant<L>, Uniform<R>) {
+        type Min = Uniform<T>;
+    }
+
+    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Uniform<L>, Uniform<R>) {
+        type Min = Uniform<T>;
+    }
+
+    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Varying<L>, Constant<R>) {
+        type Min = Varying<T>;
+    }
+
+    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Constant<L>, Varying<R>) {
+        type Min = Varying<T>;
+    }
+
+    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Varying<L>, Uniform<R>) {
+        type Min = Varying<T>;
+    }
+
+    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Uniform<L>, Varying<R>) {
+        type Min = Varying<T>;
+    }
+
+    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Varying<L>, Varying<R>) {
+        type Min = Varying<T>;
+    }
+
+    #[derive(Clone)]
+    pub struct Constant<T: ArgType> {
+        arg: T,
+    }
+
+    #[derive(Clone)]
+    pub struct Uniform<T: ArgType> {
+        arg: T,
+    }
+
+    #[derive(Clone)]
+    pub struct Varying<T: ArgType> {
+        arg: T,
+    }
+
+    unsafe impl<T: ArgType> ExprType<T> for Constant<T> {
+        unsafe fn into_t(self) -> T {
+            self.arg
+        }
+
+        unsafe fn from_t(t: T) -> Self {
+            Constant { arg: t }
+        }
+    }
+
+    unsafe impl<T: ArgType> ExprType<T> for Uniform<T> {
+        unsafe fn into_t(self) -> T {
+            self.arg
+        }
+
+        unsafe fn from_t(t: T) -> Self {
+            Uniform { arg: t }
+        }
+    }
+
+    unsafe impl<T: ArgType> ExprType<T> for Varying<T> {
+        unsafe fn into_t(self) -> T {
+            self.arg
+        }
+
+        unsafe fn from_t(t: T) -> Self {
+            Varying { arg: t }
+        }
     }
 
     pub unsafe trait ArgClass {}
@@ -1123,6 +1341,14 @@ pub mod traits {
         /// Do not call this function.
         unsafe fn create(names: fn(usize) -> VarType) -> Self;
 
+        type AsUniform;
+
+        type AsVarying;
+
+        unsafe fn as_uniform(self) -> Self::AsUniform;
+
+        unsafe fn as_varying(self) -> Self::AsVarying;
+
         fn map_args() -> ShaderArgList;
 
         fn map_data_args(self) -> ShaderArgDataList;
@@ -1148,6 +1374,24 @@ pub mod traits {
 					($($name,)*)
 				}
 
+                type AsUniform = ($(Uniform<$name>),*);
+
+                type AsVarying = ($(Varying<$name>),*);
+
+                unsafe fn as_uniform(self) -> Self::AsUniform {
+                    let ($($name,)*) = self;
+                    unsafe {
+                        ($(Uniform::from_t($name)),*)
+                    }
+                }
+
+                unsafe fn as_varying(self) -> Self::AsVarying {
+                    let ($($name,)*) = self;
+                    unsafe {
+                        ($(Varying::from_t($name)),*)
+                    }
+                }
+
 				fn map_args() -> ShaderArgList {
 					ShaderArgList {
 						args: vec![$($name::data_type()),*],
@@ -1161,6 +1405,15 @@ pub mod traits {
 					}
 				}
 			}
+
+            impl<$($name: IntoArg),*> IntoArgs for ($($name),*) {
+                type Args = ($($name::Arg,)*);
+
+                unsafe fn into_args(self) -> ($($name::Arg,)*) {
+                    let ($($name),*) = self;
+                    ($($name.into_arg(),)*)
+                }
+            }
 
             unsafe impl<T: ArgClass, $($name: ArgType + ArgParameter<T>),*> ShaderArgsClass<T> for ($($name,)*) {}
 		)
@@ -1198,7 +1451,7 @@ pub enum ItemRef {
     Var,
 }
 
-use ItemRef::{Static, Expr, Var};
+use ItemRef::{Expr, Static, Var};
 
 struct ProgramItem {
     data: Cell<VarString>,
@@ -1325,15 +1578,17 @@ macro_rules! vec_type {
         }
 
         pub unsafe trait $trait {
-            fn $vec(self) -> $vec_type;
+            type Out: ExprType<$vec_type>;
+
+            fn $vec(self) -> Self::Out;
         }
 
-        pub fn $vec<T: $trait>(args: T) -> $vec_type {
+        pub fn $vec<T: $trait>(args: T) -> T::Out {
         	args.$vec()
         }
 
         unsafe impl ArgType for $vec_type {
-        	unsafe fn create(data: VarString, r: ItemRef) -> Self {
+        	unsafe fn create(data: VarString, r: ItemRef) -> $vec_type {
         		$vec_type {
         			data: ProgramItem {
                         data: Cell::new(data),
@@ -1478,10 +1733,14 @@ macro_rules! vec_litteral {
     ($tag:expr,) => ();
     ($tag:expr, $t0:ty, $a0:ident, $f0:ident, $v0:ident, $($t:ty, $arg:ident, $f:ident, $v:ident,)*) => (
         unsafe impl $a0 for tup!($t0,$($t,)*) {
-            fn $f0(self) -> $v0 {
+            type Out = Constant<$v0>;
+
+            fn $f0(self) -> Constant<$v0> {
                 let tup!($f0,$($f,)*) = self;
-                $v0::new(var_format!("", "(", ")"; VarString::new($v0::data_type().gl_type()),
+                Constant {
+                    arg: $v0::new(var_format!("", "(", ")"; VarString::new($v0::data_type().gl_type()),
                         VarString::new(concat!(format!("{}{}", $f0, $tag),$(format!("{}{}", $f, $tag),)*))), Expr)
+                }
             }
         }
 
@@ -1534,7 +1793,14 @@ create_vec!(bool, "", Boolean4, Boolean3, Boolean2, Boolean;
     Bool4Arg,  Bool3Arg, Bool2Arg, BoolArg);
 
 unsafe impl FloatArg for Int {
-    fn float(self) -> Float {
-        Float::new(var_format!("float(", ")"; self.data.data.into_inner()), Expr)
+    type Out = Constant<Float>;
+
+    fn float(self) -> Constant<Float> {
+        Constant {
+            arg: Float::new(
+                var_format!("float(", ")"; self.data.data.into_inner()),
+                Expr,
+            ),
+        }
     }
 }
