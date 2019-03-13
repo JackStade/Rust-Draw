@@ -727,8 +727,10 @@ pub fn create_program<
     POut: ShaderArgs,
     VOut: ShaderArgs,
     FIn: ShaderArgs,
-    Vert: Fn(PIn, PUniforms) -> VOut + Sync,
-    Frag: Fn(FIn, PUniforms) -> POut + Sync,
+    VGenOut: IntoArgs<Args = VOut>,
+    FGenOut: IntoArgs<Args = POut>,
+    Vert: Fn(PIn::AsVarying, PUniforms::AsUniform) -> VGenOut + Sync,
+    Frag: Fn(FIn::AsVarying, PUniforms::AsUniform) -> FGenOut + Sync,
     Proto: ProgramPrototype<Uniforms, PUniforms, In, PIn, Out, POut, VOut, FIn>,
 >(
     gl: &mut super::GlDraw,
@@ -741,7 +743,7 @@ pub fn create_program<
     let v_pass = Proto::vert_outputs;
     let f_pass = Proto::frag_inputs;
     let output_names = Proto::frag_outputs;
-    let mut v_shader_string = CString::new(create_shader_string(
+    let v_shader_string = CString::new(create_shader_string::<PIn, PUniforms, VGenOut, Vert>(
         vertex_shader_fn,
         in_names,
         uniform_names,
@@ -751,7 +753,7 @@ pub fn create_program<
         false,
     ))
     .unwrap();
-    let mut f_shader_string = CString::new(create_shader_string(
+    let f_shader_string = CString::new(create_shader_string::<FIn, PUniforms, FGenOut, Frag>(
         fragment_shader_fn,
         f_pass,
         uniform_names,
@@ -808,8 +810,8 @@ const VERSION: &str = "#version 460 core";
 fn create_shader_string<
     In: ShaderArgs,
     Uniforms: ShaderArgs,
-    Out: ShaderArgs,
-    Shader: Fn(In, Uniforms) -> Out,
+    Out: IntoArgs,
+    Shader: Fn(In::AsVarying, Uniforms::AsUniform) -> Out,
 >(
     generator: Shader,
     input_names: fn(usize) -> VarType,
@@ -853,8 +855,8 @@ fn create_shader_string<
         }
     }
     shader = format!("{}\n", shader);
-    let out_args = Out::map_args().args;
-    for i in 0..Out::NARGS {
+    let out_args = Out::Args::map_args().args;
+    for i in 0..Out::Args::NARGS {
         if let VarType::Declare(_, n) = output_names(i) {
             if output_qualifiers {
                 shader = format!(
@@ -878,7 +880,11 @@ fn create_shader_string<
     // ensure that the names created are defined in the shader.
     let in_type = unsafe { In::create(input_names) };
     let uniform_type = unsafe { Uniforms::create(output_names) };
-    let out = generator(in_type, uniform_type).map_data_args().args;
+    let out = unsafe {
+        let input = in_type.as_varying();
+        let output = uniform_type.as_uniform();
+        generator(input, output).into_args().map_data_args().args
+    };
     shader = format!("{}\n\nvoid main() {{\n", shader);
     let mut builder = VarBuilder::new("var");
     let mut out_strings = Vec::with_capacity(out.len());
@@ -1082,14 +1088,18 @@ pub mod swizzle {
 }
 
 pub mod api {
+    pub use super::{Bool2Arg, Bool3Arg, Bool4Arg, BoolArg};
     pub use super::{Float2Arg, Float3Arg, Float4Arg, FloatArg};
+    pub use super::{Int2Arg, Int3Arg, Int4Arg, IntArg};
+    pub use super::traits::{Map};
 }
 
 pub mod traits {
+    use super::swizzle::SwizzleMask;
     use super::{DataType, ItemRef, ShaderArgDataList, ShaderArgList, VarExpr, VarString, VarType};
     use std::ops::{Add, Div, Mul, Neg, Sub};
 
-    pub unsafe trait ArgType {
+    pub unsafe trait ArgType: Clone {
         /// Do not call this function.
         unsafe fn create(data: VarString, r: ItemRef) -> Self;
 
@@ -1098,7 +1108,7 @@ pub mod traits {
         fn as_shader_data(self) -> VarString;
     }
 
-    pub unsafe trait ExprType<T: ArgType> {
+    pub unsafe trait ExprType<T: ArgType>: Clone {
         unsafe fn into_t(self) -> T;
 
         unsafe fn from_t(t: T) -> Self;
@@ -1126,6 +1136,54 @@ pub mod traits {
 
     pub trait IntoVarying<T: ArgType> {
         fn into_varying(self) -> Varying<T>;
+    }
+
+    impl<T: ArgType> IntoArg for Constant<T> {
+        type Arg = T;
+
+        unsafe fn into_arg(self) -> Self::Arg {
+            self.arg
+        }
+    }
+
+    impl<T: ArgType> IntoArg for Uniform<T> {
+        type Arg = T;
+
+        unsafe fn into_arg(self) -> Self::Arg {
+            self.arg
+        }
+    }
+
+    impl<T: ArgType> IntoArg for Varying<T> {
+        type Arg = T;
+
+        unsafe fn into_arg(self) -> Self::Arg {
+            self.arg
+        }
+    }
+
+    impl<T: ArgType> IntoArg for &Constant<T> {
+        type Arg = T;
+
+        unsafe fn into_arg(self) -> Self::Arg {
+            self.arg.clone()
+        }
+    }
+
+    impl<T: ArgType> IntoArg for &Uniform<T> {
+        type Arg = T;
+
+        unsafe fn into_arg(self) -> Self::Arg {
+            self.arg.clone()
+        }
+    }
+
+    impl<T: ArgType> IntoArg for &Varying<T> {
+        type Arg = T;
+
+        unsafe fn into_arg(self) -> Self::Arg {
+            self.arg.clone()
+        }
     }
 
     macro_rules! wrapper_ops {
@@ -1216,7 +1274,26 @@ pub mod traits {
     }
 
     pub trait ExprCombine<T: ArgType> {
-        type Min: ExprType<T> + ExprCombine<T>;
+        type Min: ExprType<T>;
+    }
+
+    pub trait ExprMin<T: ArgType> {
+        type Min: ExprType<T>;
+    }
+
+    impl<A: ArgType, T: crate::swizzle::RemoveFront> ExprMin<A> for T
+    where
+        T::Front: ExprCombine<A>,
+        T::Remaining: ExprCombine<A>,
+        (
+            <T::Front as ExprCombine<A>>::Min,
+            <T::Remaining as ExprCombine<A>>::Min,
+        ): ExprCombine<A>,
+    {
+        type Min = <(
+            <T::Front as ExprCombine<A>>::Min,
+            <T::Remaining as ExprCombine<A>>::Min,
+        ) as ExprCombine<A>>::Min;
     }
 
     impl<T: ArgType, S: ArgType> ExprCombine<T> for Constant<S> {
@@ -1228,6 +1305,42 @@ pub mod traits {
     }
 
     impl<T: ArgType, S: ArgType> ExprCombine<T> for Varying<S> {
+        type Min = Varying<T>;
+    }
+
+    impl<T: ArgType, S: ArgType> ExprCombine<T> for &Constant<S> {
+        type Min = Constant<T>;
+    }
+
+    impl<T: ArgType, S: ArgType> ExprCombine<T> for &Uniform<S> {
+        type Min = Uniform<T>;
+    }
+
+    impl<T: ArgType, S: ArgType> ExprCombine<T> for &Varying<S> {
+        type Min = Varying<T>;
+    }
+
+    impl<T: ArgType, S: ArgType> ExprCombine<T> for (Constant<S>,) {
+        type Min = Constant<T>;
+    }
+
+    impl<T: ArgType, S: ArgType> ExprCombine<T> for (Uniform<S>,) {
+        type Min = Uniform<T>;
+    }
+
+    impl<T: ArgType, S: ArgType> ExprCombine<T> for (Varying<S>,) {
+        type Min = Varying<T>;
+    }
+
+    impl<T: ArgType, S: ArgType> ExprCombine<T> for (&Constant<S>,) {
+        type Min = Constant<T>;
+    }
+
+    impl<T: ArgType, S: ArgType> ExprCombine<T> for (&Uniform<S>,) {
+        type Min = Uniform<T>;
+    }
+
+    impl<T: ArgType, S: ArgType> ExprCombine<T> for (&Varying<S>,) {
         type Min = Varying<T>;
     }
 
@@ -1269,17 +1382,17 @@ pub mod traits {
 
     #[derive(Clone)]
     pub struct Constant<T: ArgType> {
-        arg: T,
+        pub(super) arg: T,
     }
 
     #[derive(Clone)]
     pub struct Uniform<T: ArgType> {
-        arg: T,
+        pub(super) arg: T,
     }
 
     #[derive(Clone)]
     pub struct Varying<T: ArgType> {
-        arg: T,
+        pub(super) arg: T,
     }
 
     unsafe impl<T: ArgType> ExprType<T> for Constant<T> {
@@ -1310,6 +1423,17 @@ pub mod traits {
         unsafe fn from_t(t: T) -> Self {
             Varying { arg: t }
         }
+    }
+
+    pub trait Map<T: ArgType, T1: ArgType, T2: ArgType, T3: ArgType, T4: ArgType, S>:
+        ExprType<T>
+    {
+        fn map<SZ: SwizzleMask<T1, T2, T3, T4, S>>(
+            &self,
+            mask: SZ,
+        ) -> <Self as ExprCombine<SZ::Out>>::Min
+        where
+            Self: ExprCombine<SZ::Out>;
     }
 
     pub unsafe trait ArgClass {}
@@ -1354,6 +1478,10 @@ pub mod traits {
         fn map_data_args(self) -> ShaderArgDataList;
     }
 
+    pub unsafe trait Construct<T: ArgType> {
+        fn as_arg(self) -> T;
+    }
+
     /// Sometimes it is neccessary to restrict a type to only certain types
     /// of arguments.
     pub unsafe trait ShaderArgsClass<T>: ShaderArgs {}
@@ -1380,16 +1508,12 @@ pub mod traits {
 
                 unsafe fn as_uniform(self) -> Self::AsUniform {
                     let ($($name,)*) = self;
-                    unsafe {
-                        ($(Uniform::from_t($name)),*)
-                    }
+                    ($(Uniform::from_t($name)),*)
                 }
 
                 unsafe fn as_varying(self) -> Self::AsVarying {
                     let ($($name,)*) = self;
-                    unsafe {
-                        ($(Varying::from_t($name)),*)
-                    }
+                    ($(Varying::from_t($name)),*)
                 }
 
 				fn map_args() -> ShaderArgList {
@@ -1583,6 +1707,16 @@ macro_rules! vec_type {
             fn $vec(self) -> Self::Out;
         }
 
+        unsafe impl<T: ShaderArgs + Construct<$vec_type>, S: IntoArgs<Args = T> + ExprMin<$vec_type>> $trait for S {
+            type Out = S::Min;
+
+            fn $vec(self) -> Self::Out {
+                unsafe {
+                    S::Min::from_t(self.into_args().as_arg())
+                }
+            }
+        }
+
         pub fn $vec<T: $trait>(args: T) -> T::Out {
         	args.$vec()
         }
@@ -1617,8 +1751,8 @@ macro_rules! vec_type {
 
 macro_rules! subs {
 	($trait:ident, $vec:ident, $vec_type:ident;$($start:ident,)*;) => (
-		unsafe impl $trait for ($($start),*) {
-			fn $vec(self) -> $vec_type {
+		unsafe impl Construct<$vec_type> for ($($start),*) {
+			fn as_arg(self) -> $vec_type {
 				match_from!(self, $($start,)*;u1, u2, u3, u4,;);
                 $vec_type::new(var_format!("", "(", ")"; VarString::new($vec_type::data_type().gl_type()),
                         concat_enough!($($start,)* ; u1, u2, u3, u4,;)), Expr)
@@ -1702,23 +1836,29 @@ macro_rules! vec_swizzle {
 	);
     ($vec:ident,;$($types:ident,)*;$sz:ident,) => (
         #[cfg(feature = "opengl42")]
-        impl $vec {
+        impl<E: ExprType<$vec>> Map<$vec,$($types,)*swizzle::$sz> for E {
             /// Applies a swizzle mask to the vector type. Note that this is only availible for
-            /// single item types when version >= opengl4.2.
-            pub fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(self, mask: T) -> T::Out {
+            /// single item types when the opengl version is 4.2 or greater.
+            fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(&self, _mask: T) -> <Self as ExprCombine<T::Out>>::Min
+            where Self: ExprCombine<T::Out> {
                 unsafe {
-                    T::Out::create(var_format!("", ".", ""; self.data.data.into_inner(), VarString::new(T::get_vars())), Expr)
+                    <Self as ExprCombine<T::Out>>::Min::from_t(
+                        T::Out::create(var_format!("", ".", ""; self.clone().into_t().data.data.into_inner(), VarString::new(T::get_vars())), Expr)
+                    )
                 }
             }
         }
     );
 	($vec:ident, $($next:ident,)+;$($types:ident,)*;$sz:ident, $($s:ident,)*) => (
-		impl $vec {
+		impl<E: ExprType<$vec>> Map<$vec,$($types,)*swizzle::$sz> for E {
             /// Applies a swizzle mask to the vector type.
-			pub fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(self, mask: T) -> T::Out {
-				unsafe {
-					T::Out::create(var_format!("", ".", ""; self.data.data.into_inner(), VarString::new(T::get_vars())), Expr)
-				}
+			fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(&self, _mask: T) -> <Self as ExprCombine<T::Out>>::Min
+            where Self: ExprCombine<T::Out> {
+                unsafe {
+    				<Self as ExprCombine<T::Out>>::Min::from_t(
+    					T::Out::create(var_format!("", ".", ""; self.clone().into_t().data.data.into_inner(), VarString::new(T::get_vars())), Expr)
+    				)
+                }
 			}
 		}
 
