@@ -25,6 +25,10 @@ use self::parking_lot::Mutex;
 
 /// The shader module contains lower level functions for creating and using shaders.
 /// This is an advanced feature that can be difficult to use correctly.
+///
+/// Because it uses a complex system of types with many blanket implementations, 
+/// it is difficult to understand how this module works from the auto-doc. In
+/// the future there will be a shader guide.
 #[allow(non_snake_case)]
 pub mod shader;
 

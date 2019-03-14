@@ -22,17 +22,17 @@ pub fn test_window() {
     let mut gl = opengl::get_gl().unwrap();
     let mut window = gl.new_window(800, 800, CoordinateSpace::PixelsTopLeft, "Test Window");
     let proto = shader::depth_prototype(shader::ShaderParamSet::<
-        (),
+        (shader::Mat4x4,),
         (shader::Float3, shader::Float4),
         (shader::Float4,),
         (shader::Float4,),
     >::new());
-    let shader_program = shader::create_program(
+    /*let shader_program = shader::create_program(
         &mut gl,
         &proto,
-        |input, _| ((&input.0, shader::float(1.0)).float4(), input.1),
+        |input, transform| (transform * (&input.0, shader::float(1.0)).float4(), input.1),
         |input, _| (input.map((shader::swizzle::Y,)), input),
-    );
+    );*/
 
     let mut tex = Vec::with_capacity(4 * 128 * 128);
     for i in 0..128 {

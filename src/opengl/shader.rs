@@ -258,9 +258,15 @@ pub enum DataType {
     Boolean2,
     Boolean3,
     Boolean4,
-    Mat2,
-    Mat3,
-    Mat4,
+    Mat2x2,
+    Mat2x3,
+    Mat2x4,
+    Mat3x2,
+    Mat3x3,
+    Mat3x4,
+    Mat4x2,
+    Mat4x3,
+    Mat4x4,
 }
 
 impl DataType {
@@ -278,9 +284,15 @@ impl DataType {
             DataType::Boolean2 => "bvec2",
             DataType::Boolean3 => "bvec3",
             DataType::Boolean4 => "bvec4",
-            DataType::Mat2 => "mat2",
-            DataType::Mat3 => "mat3",
-            DataType::Mat4 => "mat4",
+            DataType::Mat2x2 => "mat2",
+            DataType::Mat2x3 => "mat2x3",
+            DataType::Mat2x4 => "mat2x4",
+            DataType::Mat3x2 => "mat3x2",
+            DataType::Mat3x3 => "mat3",
+            DataType::Mat3x4 => "mat3x4",
+            DataType::Mat4x2 => "mat4x2",
+            DataType::Mat4x3 => "mat4x3",
+            DataType::Mat4x4 => "mat4x4",
         }
     }
 }
@@ -879,7 +891,7 @@ fn create_shader_string<
     // the create function are marked as unsafe because it is neccesary to
     // ensure that the names created are defined in the shader.
     let in_type = unsafe { In::create(input_names) };
-    let uniform_type = unsafe { Uniforms::create(output_names) };
+    let uniform_type = unsafe { Uniforms::create(uniform_names) };
     let out = unsafe {
         let input = in_type.as_varying();
         let output = uniform_type.as_uniform();
@@ -1202,48 +1214,48 @@ pub mod traits {
 
     macro_rules! wrapper_impls {
         ($op:ident, $op_func:ident, $l:ident, $r:ident, $o:ident) => {
-            impl<O: ArgType, L: ArgType + Add<R, Output = O>, R: ArgType> $op<$r<R>> for $l<L> {
+            impl<O: ArgType, L: ArgType + $op<R, Output = O>, R: ArgType> $op<$r<R>> for $l<L> {
                 type Output = $o<O>;
 
                 fn $op_func(self, rhs: $r<R>) -> $o<O> {
                     $o {
-                        arg: self.arg + rhs.arg,
+                        arg: $op::$op_func(self.arg, rhs.arg),
                     }
                 }
             }
 
-            impl<O: ArgType, L: ArgType + Add<R, Output = O> + Clone, R: ArgType> $op<$r<R>>
+            impl<O: ArgType, L: ArgType + $op<R, Output = O> + Clone, R: ArgType> $op<$r<R>>
                 for &$l<L>
             {
                 type Output = $o<O>;
 
                 fn $op_func(self, rhs: $r<R>) -> $o<O> {
                     $o {
-                        arg: self.clone().arg + rhs.arg,
+                        arg: $op::$op_func(self.clone().arg, rhs.arg),
                     }
                 }
             }
 
-            impl<O: ArgType, L: ArgType + Add<R, Output = O>, R: ArgType + Clone> $op<&$r<R>>
+            impl<O: ArgType, L: ArgType + $op<R, Output = O>, R: ArgType + Clone> $op<&$r<R>>
                 for $l<L>
             {
                 type Output = $o<O>;
 
                 fn $op_func(self, rhs: &$r<R>) -> $o<O> {
                     $o {
-                        arg: self.arg + rhs.clone().arg,
+                        arg: $op::$op_func(self.arg, rhs.clone().arg),
                     }
                 }
             }
 
-            impl<O: ArgType, L: ArgType + Add<R, Output = O> + Clone, R: ArgType + Clone>
+            impl<O: ArgType, L: ArgType + $op<R, Output = O> + Clone, R: ArgType + Clone>
                 $op<&$r<R>> for &$l<L>
             {
                 type Output = $o<O>;
 
                 fn $op_func(self, rhs: &$r<R>) -> $o<O> {
                     $o {
-                        arg: self.clone().arg + rhs.clone().arg,
+                        arg: $op::$op_func(self.clone().arg, rhs.clone().arg),
                     }
                 }
             }
@@ -1932,15 +1944,150 @@ create_vec!(bool, "", Boolean4, Boolean3, Boolean2, Boolean;
     boolean4, boolean3, boolean2, boolean;
     Bool4Arg,  Bool3Arg, Bool2Arg, BoolArg);
 
-unsafe impl FloatArg for Int {
-    type Out = Constant<Float>;
-
-    fn float(self) -> Constant<Float> {
-        Constant {
-            arg: Float::new(
-                var_format!("float(", ")"; self.data.data.into_inner()),
-                Expr,
-            ),
+macro_rules! impl_matrix {
+    ($matrix_type:ident, $matrix_fn:ident, $data:expr, $trait:ident) => (
+        #[derive(Clone)]
+        pub struct $matrix_type {
+            data: ProgramItem,
         }
-    }
+
+        impl $matrix_type {
+            fn new(data: VarString, r: ItemRef) -> $matrix_type {
+                $matrix_type {
+                    data: ProgramItem::new(data, $data, r),
+                }
+            }
+        }
+
+        pub fn $matrix_fn<T: $trait>(t: T) -> T::Out {
+            t.$matrix_fn()
+        }
+
+        impl Add<$matrix_type> for $matrix_type {
+            type Output = $matrix_type;
+
+            fn add(self, rhs: $matrix_type) -> $matrix_type {
+                let (l, r) = (self.data.data.into_inner(), rhs.data.data.into_inner());
+                $matrix_type::new(var_format!("(", " + ", ")"; l, r), Expr)
+            }
+        }
+
+        pub unsafe trait $trait {
+            type Out: ExprType<$matrix_type>;
+
+            fn $matrix_fn(self) -> Self::Out;
+        }
+
+        unsafe impl<T: ShaderArgs + Construct<$matrix_type>, S: IntoArgs<Args = T> + ExprMin<$matrix_type>> $trait for S {
+            type Out = S::Min;
+
+            fn $matrix_fn(self) -> Self::Out {
+                unsafe {
+                    S::Min::from_t(self.into_args().as_arg())
+                }
+            }
+        }
+
+        unsafe impl ArgType for $matrix_type {
+            unsafe fn create(data: VarString, r: ItemRef) -> $matrix_type {
+                $matrix_type {
+                    data: ProgramItem {
+                        data: Cell::new(data),
+                        ref_type: Cell::new(r),
+                        ty: $data,
+                    }
+                }
+            }
+
+            fn data_type() -> DataType {
+                $data
+            }
+
+            fn as_shader_data(self) -> VarString {
+                self.data.data.into_inner()
+            }
+        }
+
+        unsafe impl ArgParameter<TransparentArgs> for $matrix_type {}
+    )
 }
+
+macro_rules! matrix_subs {
+    ($($vec:ident, $m1:ident, $m2:ident, $m3:ident,;)*) => (
+        $(
+            matrix_subs!($m1, $vec, $vec, $vec, $vec,);
+            matrix_subs!($m2, $vec, $vec, $vec,);
+            matrix_subs!($m3, $vec, $vec,);
+        )*
+    );
+    ($mat_type:ident, $($vecs:ident,)*) => (
+        unsafe impl Construct<$mat_type> for ($($vecs),*) {
+            fn as_arg(self) -> $mat_type {
+                match_from!(self, $($vecs,)*;u1, u2, u3, u4,;);
+                $mat_type::new(var_format!("", "(", ")"; VarString::new($mat_type::data_type().gl_type()),
+                        concat_enough!($($vecs,)* ; u1, u2, u3, u4,;)), Expr)
+            }
+        }
+    )
+}
+
+macro_rules! arg_op {
+    ($op:ident, $op_fn:ident, $t1:ident, $t2:ident, $out:ident) => (
+        impl $op<$t2> for $t1 {
+            type Output = $out;
+
+            fn $op_fn(self, rhs: $t2) -> $out {
+                let (l, r) = (self.data.data.into_inner(), rhs.data.data.into_inner());
+                $out::new(var_format!("(", " * ", ")"; l, r), Expr)
+            }
+        }
+    )
+}
+
+macro_rules! mat_ops {
+    (!$($vec:ident,)*;;) => ();
+    ($($vec:ident,)*;;) => ();
+    ($(;)* | $($($fmat:ident,)*;)*) => ();
+    (!$($vec:ident,)*;$v0:ident, $($ev:ident,)*;$($m0:ident,)*;$($($mat:ident,)*;)*) => (
+        $(
+            arg_op!(Mul, mul, $m0, $vec, $v0);
+            arg_op!(Mul, mul, $v0, $m0, $vec);
+        )*
+
+        mat_ops!(!$($vec,)*;$($ev,)*;$($($mat,)*;)*);
+    );
+    ($($vec:ident,)*;$v0:ident, $($ev:ident,)*;$($m0:ident,)*;$($($mat:ident,)*;)*) => (
+        $(
+            arg_op!(Mul, mul, $m0, $vec, $v0);
+        )*
+
+        mat_ops!($($vec,)*;$($ev,)*;$($($mat,)*;)*);
+    );
+    ($($m0:ident, $($mat:ident,)*;)* | $($($fmat:ident,)*;)*) => (
+        mat_ops!($($m0,)*;$($m0,)*;$($($fmat,)*;)*);
+
+        mat_ops!($($($mat,)*;)* | $($($fmat,)*;)*);
+    )
+
+}
+
+macro_rules! create_matrix {
+    ($t:ident, $($vec:ident, $($mat:ident, $mat_fn:ident, $trait:ident,)*;)*) => (
+        matrix_subs!($($vec, $($mat,)*;)*);
+        mat_ops!($($($mat,)*;)* | $($($mat,)*;)*);
+        mat_ops!(!$($vec,)*;$($vec,)*;$($($mat,)*;)*);
+
+        $(
+            $(
+                arg_op!(Mul, mul, $t, $mat, $mat);
+                arg_op!(Mul, mul, $mat, $t, $mat);
+                impl_matrix!($mat, $mat_fn, DataType::$mat, $trait);
+            )*
+        )*
+    )
+}
+
+create_matrix!(Float, Float4, Mat4x4, mat4x4, Mat4x4Arg, Mat3x4, mat3x4, Mat3x4Arg, Mat2x4, mat2x4, Mat2x4Arg,;
+    Float3, Mat4x3, mat4x3, Mat4x3Arg, Mat3x3, mat3x3, Mat3x3Arg, Mat2x3, mat2x3, Mat2x3Arg,;
+    Float2, Mat4x2, mat4x2, Mat4x2Arg, Mat3x2, mat3x2, Mat3x2Arg, Mat2x2, mat2x2, Mat2x2Arg,;);
+
