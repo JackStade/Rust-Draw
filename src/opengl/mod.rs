@@ -695,7 +695,6 @@ impl GlWindow {
                 gl::STREAM_DRAW,
             );
 
-            // gl::DrawArrays(gl::TRIANGLES, 0, 3);
             gl::DrawElements(gl::TRIANGLES, 6, gl::UNSIGNED_BYTE, ptr::null());
         }
     }
@@ -712,10 +711,6 @@ impl GlWindow {
         draw(self);
         std::mem::swap(&mut old_matrix, &mut window.base_matrix);
     }
-
-    /*pub fn draw_mesh<In: ShaderArgs, Out: ShaderArgs>(&mut self, mesh: GlMesh<In>, target: RenderTarger<Out>) {
-
-    }*/
 
     /// Gets the position in coordinate-space coordinates of a position on the window. Useful for
     /// uis, etc.

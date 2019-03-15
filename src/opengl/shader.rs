@@ -67,22 +67,6 @@ void main() {
 }
 ";
 
-// while the structures used for generating glsl code are purely
-// functional, glsl is not a functional language by any stretch of
-// the imagination. This type represents a glsl expression that has side
-// effects. Every glsl expression contains of list of the side effects that its represented
-// value depends on.
-//
-// each object has a seperate space of variable name ids, and stores a complete
-// list of neccesary dependencies.
-// every side effect layer has a namespace that the next layer refers to
-// each layer also inherits the namespaces of previous layers.
-#[derive(Clone, PartialEq)]
-enum SideEffect {
-    Declaration(DataType, VarString),
-    Loop(LoopIter, Vec<VarExpr>),
-}
-
 struct VarBuilder {
     strings: Vec<String>,
     used_vars: usize,
@@ -564,14 +548,6 @@ pub mod builtin_vars {
 
     pub struct BuiltInVar<T: ArgType, N: VarName> {
         phantom: PhantomData<(T, N)>,
-    }
-
-    impl<T: ArgType, N: VarName> BuiltInVar<T, N> {
-        pub(crate) fn new() -> BuiltInVar<T, N> {
-            BuiltInVar {
-                phantom: PhantomData,
-            }
-        }
     }
 
     pub unsafe trait VarName {
@@ -1502,6 +1478,7 @@ pub mod traits {
 		// a macro could be implemented that counts the number of arguments
 		// that are passed to this macro, but that would be pretty unneccesary
 		($($name:ident),*; $num:expr) => (
+            #[allow(unused_parens)]
 			unsafe impl<$($name: ArgType),*> ShaderArgs for ($($name,)*) {
 				const NARGS: usize = $num;
 
@@ -1671,12 +1648,6 @@ macro_rules! vec_type {
         }
 
         impl $vec_type {
-            fn new_static(data: VarString) -> $vec_type {
-                $vec_type {
-                    data: ProgramItem::new(data, $data, Static),
-                }
-            }
-
             fn new(data: VarString, r: ItemRef) -> $vec_type {
                 $vec_type {
                     data: ProgramItem::new(data, $data, r),

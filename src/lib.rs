@@ -27,12 +27,12 @@ pub fn test_window() {
         (shader::Float4,),
         (shader::Float4,),
     >::new());
-    /*let shader_program = shader::create_program(
+    let shader_program = shader::create_program(
         &mut gl,
         &proto,
         |input, transform| (transform * (&input.0, shader::float(1.0)).float4(), input.1),
         |input, _| (input.map((shader::swizzle::Y,)), input),
-    );*/
+    );
 
     let mut tex = Vec::with_capacity(4 * 128 * 128);
     for i in 0..128 {
