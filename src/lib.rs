@@ -19,20 +19,7 @@ use std::time::{Duration, Instant};
 use swizzle::SwizzleInPlace;
 
 pub fn test_window() {
-    let mut gl = opengl::get_gl().unwrap();
-    let mut window = gl.new_window(800, 800, CoordinateSpace::PixelsTopLeft, "Test Window");
-    let proto = shader::depth_prototype(shader::ShaderParamSet::<
-        (shader::Mat4x4,),
-        (shader::Float3, shader::Float4),
-        (shader::Float4,),
-        (shader::Float4,),
-    >::new());
-    let shader_program = shader::create_program(
-        &mut gl,
-        &proto,
-        |input, transform| (transform * (&input.0, shader::float(1.0)).float4(), input.1),
-        |input, _| (input.map((shader::swizzle::Y,)), input),
-    );
+    let mut gl = unsafe { opengl::get_gl().unwrap() };
 
     let mut tex = Vec::with_capacity(4 * 128 * 128);
     for i in 0..128 {
@@ -46,6 +33,7 @@ pub fn test_window() {
     }
 
     let image = gl.load_image(128, 128, &tex[..]);
+    let mut window = gl.new_window(800, 800, CoordinateSpace::PixelsTopLeft, "Test Window");
     gl.draw(&window);
     let c = window.get_window_pos(0.5, 0.5);
     let n = window.get_window_pos(0.75, 0.75);
@@ -53,6 +41,20 @@ pub fn test_window() {
         std::thread::sleep(std::time::Duration::new(0, 10));
         window.background(color::Color8Bit {
             color: [255, 255, 255, 255],
+        });
+        let c = window.get_window_pos(0.5, 0.5);
+        let n = window.get_window_pos(0.75, 0.75);
+        // window.draw_triangle([0.0, 1.0, 1.0, 1.0], [c.0, c.1, 0.0, n.0, c.1, 0.0, c.0, n.1, 0.0]);
+        window.draw_image(&image, c, n);
+        gl.draw(&window);
+    }
+    window.close();
+    std::thread::sleep(std::time::Duration::new(10, 0));
+    let mut window = gl.new_window(800, 800, CoordinateSpace::PixelsBottomLeft, "Second Window");
+    for i in 0..300 {
+        std::thread::sleep(std::time::Duration::new(0, 10));
+        window.background(color::Color8Bit {
+            color: [0, 255, 255, 255],
         });
         let c = window.get_window_pos(0.5, 0.5);
         let n = window.get_window_pos(0.75, 0.75);

@@ -1076,10 +1076,10 @@ pub mod swizzle {
 }
 
 pub mod api {
+    pub use super::traits::Map;
     pub use super::{Bool2Arg, Bool3Arg, Bool4Arg, BoolArg};
     pub use super::{Float2Arg, Float3Arg, Float4Arg, FloatArg};
     pub use super::{Int2Arg, Int3Arg, Int4Arg, IntArg};
-    pub use super::traits::{Map};
 }
 
 pub mod traits {
@@ -2061,4 +2061,3 @@ macro_rules! create_matrix {
 create_matrix!(Float, Float4, Mat4x4, mat4x4, Mat4x4Arg, Mat3x4, mat3x4, Mat3x4Arg, Mat2x4, mat2x4, Mat2x4Arg,;
     Float3, Mat4x3, mat4x3, Mat4x3Arg, Mat3x3, mat3x3, Mat3x3Arg, Mat2x3, mat2x3, Mat2x3Arg,;
     Float2, Mat4x2, mat4x2, Mat4x2Arg, Mat3x2, mat3x2, Mat3x2Arg, Mat2x2, mat2x2, Mat2x2Arg,;);
-

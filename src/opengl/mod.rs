@@ -7,6 +7,7 @@ use std::ffi::CString;
 use std::fmt;
 use std::fs::File;
 use std::marker::PhantomData;
+use std::mem;
 use std::os::raw::{c_int, c_void};
 use std::ptr;
 use std::result::Result;
@@ -26,35 +27,56 @@ use self::parking_lot::Mutex;
 /// The shader module contains lower level functions for creating and using shaders.
 /// This is an advanced feature that can be difficult to use correctly.
 ///
-/// Because it uses a complex system of types with many blanket implementations, 
+/// Because it uses a complex system of types with many blanket implementations,
 /// it is difficult to understand how this module works from the auto-doc. In
 /// the future there will be a shader guide.
 #[allow(non_snake_case)]
 pub mod shader;
 
-static mut GL_DRAW: Option<GlDrawCore> = None;
+static mut GL_DRAW: *mut GlDrawCore = 0 as *mut _ ;
 
-static DRAW_INIT: AtomicBool = ATOMIC_BOOL_INIT;
+static mut DRAW_INIT: bool = false;
+
+#[inline(always)]
+fn inner_gl<'a>(_: &'a mut GlDraw) -> &'a mut GlDrawCore {
+    unsafe { &mut *GL_DRAW }
+}
+
+#[inline(always)]
+fn inner_gl_static<'a>(_: &'a GlDraw) -> &'a GlDrawCore {
+    unsafe { &*GL_DRAW }
+}
+
+#[inline(always)]
+unsafe fn inner_gl_unsafe<'a>() -> &'a mut GlDrawCore {
+    &mut *GL_DRAW
+}
+
+#[inline(always)]
+unsafe fn inner_gl_unsafe_static<'a>() -> &'a GlDrawCore {
+    &*GL_DRAW
+}
 
 /// Initializes gl/glfw.
-pub fn get_gl() -> Result<GlDraw, InitError> {
-    // check if there is already an active gl. It is unlikely that get_gl will be called by
-    // two different threads at the same time, but it is neccesary to use atomics here to prevent
-    // scary things from happening if it is
-    let init = DRAW_INIT.swap(true, Ordering::AcqRel);
+///
+/// When only using this library, calling this function is completely safe. However, the gl/glfw api
+/// is not specific to this crate, and use of either opengl or glfw by other crates can cause crashes
+/// or unexpected behavior.
+///
+/// Calling this function is completely safe if no other crates that interact gl/glfw are being used.
+pub unsafe fn get_gl() -> Result<GlDraw, InitError> {
+    if let Some("main") = thread::current().name() {
+    } else {
+        return Err(InitError::NonMainThread);
+    }
+    let init = mem::replace(&mut DRAW_INIT, true);
     if init {
         return Err(InitError::AlreadyInitialized);
     }
-    if let Some("main") = thread::current().name() {
-    } else {
-        // TODO: this check currently doesn't work, cfg!(macos) is always false
-        if cfg!(macos) {
-            return Err(InitError::MacosNonMainThread);
-        } else {
-            // in theory, it is safe to run glfw on a seperate thread on other systems
-            println!("Warning - GLFW should not be initialized on non-main thread.");
-        }
-    }
+
+    let draw_box = Box::new(GlDrawCore::new());
+    GL_DRAW = Box::into_raw(draw_box);
+
     unsafe {
         if glfw_raw::glfwInit() == glfw_raw::TRUE {
             // default opengl version
@@ -72,18 +94,13 @@ pub fn get_gl() -> Result<GlDraw, InitError> {
             return Err(InitError::GlfwError);
         }
     }
-    // here we know that this is the GLFW thread, so no other threads can be accessing GL_DRAW
-    unsafe {
-        let gl_draw = GlDrawCore::init();
-        GL_DRAW = Some(gl_draw);
-    }
     Ok(GlDraw {
         phantom: PhantomData,
     })
 }
 
 pub enum InitError {
-    MacosNonMainThread,
+    NonMainThread,
     AlreadyInitialized,
     GlfwError,
 }
@@ -91,9 +108,7 @@ pub enum InitError {
 impl fmt::Debug for InitError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            InitError::MacosNonMainThread => {
-                write!(f, "GL must be initialized on the main thread on macos.")
-            }
+            InitError::NonMainThread => write!(f, "GL must be initialized on the main thread."),
             InitError::AlreadyInitialized => write!(f, "GL has already been initialized."),
             InitError::GlfwError => write!(f, "An unknown error occured."),
         }
@@ -116,6 +131,9 @@ struct GlDrawCore {
     current_window: u32,
     root_window: *mut glfw_raw::GLFWwindow,
 
+    image_list: Vec<Option<GLuint>>,
+    orphan_textures: Vec<ImageData>,
+
     // the buffers to be used for free drawing
     draw_buffers: [GLuint; NUM_DRAW_BUFFERS as usize],
     // a vao that is attached to the window that is currently being drawn
@@ -131,7 +149,7 @@ struct GlDrawCore {
 }
 
 impl GlDrawCore {
-    fn init() -> GlDrawCore {
+    fn new() -> GlDrawCore {
         GlDrawCore {
             num_windows: 0,
             total_windows: 0,
@@ -140,6 +158,9 @@ impl GlDrawCore {
             windows: Vec::new(),
             current_window: 0,
             root_window: ptr::null_mut(),
+
+            image_list: Vec::new(),
+            orphan_textures: Vec::new(),
 
             draw_buffers: [0; NUM_DRAW_BUFFERS as usize],
             current_draw_vao: 0,
@@ -150,6 +171,64 @@ impl GlDrawCore {
             color_shader_uniform_locations: [0; 2],
             tex_shader_uniform_locations: [0; 2],
         }
+    }
+
+    fn orphan_resources(&mut self) {
+        self.init_gl = false;
+
+        for (i, s) in self.image_list.iter().enumerate() {
+            if let Some(tex) = s {
+                let mut w = 0u32;
+                let mut h = 0u32;
+                let buffer = unsafe {
+                    gl::BindTexture(gl::TEXTURE_2D, *tex);
+                    gl::GetTexLevelParameteriv(
+                        gl::TEXTURE_2D,
+                        0,
+                        gl::TEXTURE_WIDTH,
+                        &mut w as *mut _ as *mut _,
+                    );
+                    gl::GetTexLevelParameteriv(
+                        gl::TEXTURE_2D,
+                        0,
+                        gl::TEXTURE_WIDTH,
+                        &mut h as *mut _ as *mut _,
+                    );
+                    let mut buffer = Vec::with_capacity((w * h) as usize);
+                    buffer.set_len((w * h) as usize);
+                    gl::GetTexImage(
+                        gl::TEXTURE_2D,
+                        0,
+                        gl::RGBA,
+                        gl::UNSIGNED_BYTE,
+                        buffer.as_ptr() as *mut _,
+                    );
+                    buffer
+                };
+                self.orphan_textures.push(ImageData {
+                    data: buffer,
+                    image_id: i as u32,
+                    width: w,
+                    height: h,
+                });
+            }
+        }
+    }
+
+    fn image(&mut self, image_id: GLuint) -> u32 {
+        let mut found = None;
+        for (i, slot) in self.image_list.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(image_id);
+                found = Some(i);
+                break;
+            }
+        }
+        if found.is_none() {
+            found = Some(self.image_list.len());
+            self.image_list.push(Some(image_id));
+        }
+        found.unwrap() as u32
     }
 
     fn use_window(&mut self, window_id: u32) {
@@ -208,6 +287,44 @@ impl WindowCore {
     }
 }
 
+struct ImageData {
+    // most opengl functions prefer 4-aligned buffers
+    data: Vec<u32>,
+    image_id: u32,
+
+    width: u32,
+    height: u32,
+}
+
+impl ImageData {
+    fn load(self) {
+        let mut tex = 0;
+        unsafe {
+            gl::GenTextures(1, &mut tex);
+            gl::BindTexture(gl::TEXTURE_2D, tex);
+            gl::PixelStorei(gl::UNPACK_ALIGNMENT, 4);
+            gl::TexImage2D(
+                gl::TEXTURE_2D,
+                0,
+                // more formats might be possible in the future
+                gl::RGBA8 as i32,
+                self.width as i32,
+                self.height as i32,
+                0,
+                gl::RGBA,
+                gl::UNSIGNED_BYTE,
+                self.data.as_ptr() as *const _,
+            );
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
+        }
+
+        // load will only be called on the main thread
+        let gl_draw = unsafe { inner_gl_unsafe() };
+        gl_draw.image_list[self.image_id as usize] = Some(tex);
+    }
+}
+
 /// A handle that represents the global state of GLFW
 pub struct GlDraw {
     // rc::Rc makes this type non-send and non-sync
@@ -219,12 +336,20 @@ impl Drop for GlDraw {
 }
 
 pub struct GlImage {
-    gl_texture: GLuint,
+    image_id: u32,
+
     width: u32,
     height: u32,
     // images cannot be send or sync because they should not be dropped
     // on a different thread
     phantom: PhantomData<std::rc::Rc<()>>,
+}
+
+impl GlImage {
+    fn get_image(&self) -> GLuint {
+        let gl_draw = unsafe { inner_gl_unsafe() };
+        gl_draw.image_list[self.image_id as usize].unwrap()
+    }
 }
 
 impl GlDraw {
@@ -233,7 +358,8 @@ impl GlDraw {
     ///
     /// Note that it is generally assumed that there are no more than a few windows. Trying to
     /// open more than 10 or so may drastically reduce performance and may cause things to break.
-    /// Having multiple windows in general is likely to be very unstable.
+    ///
+    /// Having multiple windows in general is likely to be unstable.
     pub fn new_window(
         &mut self,
         width: u32,
@@ -241,11 +367,7 @@ impl GlDraw {
         space: CoordinateSpace,
         name: &str,
     ) -> GlWindow {
-        let gl_draw;
-        // GlDraw is not send, so new_window can only be called on the main thread
-        unsafe {
-            gl_draw = GL_DRAW.as_mut().unwrap();
-        }
+        let gl_draw = inner_gl(self);
         let window_ptr = unsafe {
             let window = glfw_raw::glfwCreateWindow(
                 width as c_int,
@@ -280,6 +402,7 @@ impl GlDraw {
             let mut buffers = [0; NUM_DRAW_BUFFERS as usize];
             unsafe {
                 gl::GenBuffers(NUM_DRAW_BUFFERS, (&mut buffers).as_mut_ptr());
+                gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
             }
 
             gl_draw.draw_buffers = buffers;
@@ -309,6 +432,10 @@ impl GlDraw {
 
             gl_draw.color_shader = color_shader;
             gl_draw.tex_shader = tex_shader;
+
+            while let Some(orphan) = gl_draw.orphan_textures.pop() {
+                orphan.load();
+            }
 
             gl_draw.init_gl = true;
         }
@@ -373,15 +500,52 @@ impl GlDraw {
         gl_draw.total_windows += 1;
         GlWindow {
             id: slot as u32,
+            ptr: window_ptr,
             phantom: PhantomData,
         }
     }
 
     pub fn load_image(&mut self, width: u32, height: u32, bytes: &[u8]) -> GlImage {
+        if bytes.len() < (4 * width * height) as usize {
+            panic!("Slice provided is not long enough for an image of size {}x{}, must be at least {} bytes.", width, height, width * height * 4);
+        };
+        let gl_draw = inner_gl(self);
+
+        if gl_draw.num_windows == 0 {
+            let mut datastore = Vec::with_capacity((width * height) as usize);
+            // we need to covert to a slice of u32
+            unsafe {
+                // need to be careful here because src isn't neccesarily aligned
+                ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    datastore.as_mut_ptr() as *mut u8,
+                    (4 * width * height) as usize,
+                );
+                datastore.set_len((width * height) as usize);
+            }
+            let id = gl_draw.image(0);
+
+            gl_draw.orphan_textures.push(ImageData {
+                data: datastore,
+                image_id: id,
+
+                width: width,
+                height: height,
+            });
+
+            return GlImage {
+                image_id: id,
+
+                width: width,
+                height: height,
+                phantom: PhantomData,
+            };
+        };
         let mut tex = 0;
         unsafe {
             gl::GenTextures(1, &mut tex);
             gl::BindTexture(gl::TEXTURE_2D, tex);
+            gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
             gl::TexImage2D(
                 gl::TEXTURE_2D,
                 0,
@@ -396,8 +560,10 @@ impl GlDraw {
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
         }
+        let id = gl_draw.image(tex);
         GlImage {
-            gl_texture: tex,
+            image_id: id,
+
             width: width,
             height: height,
             phantom: PhantomData,
@@ -406,11 +572,7 @@ impl GlDraw {
 
     /// Draws the specified window. When there are multiple windows, it is reccomended to use draw_all
     pub fn draw(&mut self, window: &GlWindow) {
-        let gl_draw;
-        // draw can only be called on the thread that initialized gl, so this is safe
-        unsafe {
-            gl_draw = GL_DRAW.as_mut().unwrap();
-        }
+        let gl_draw = inner_gl(self);
         let window_id = window.id;
         gl_draw.use_window(window_id);
         let window = gl_draw.windows[window_id as usize].as_mut().unwrap();
@@ -436,7 +598,9 @@ impl GlDraw {
     }
 
     // draws all windows currently open
-    pub fn draw_all(&mut self) {}
+    pub fn draw_all(&mut self) {
+        unimplemented!();
+    }
 }
 
 pub mod gl_mesh {
@@ -532,10 +696,7 @@ extern "C" fn key_callback(
 }
 
 extern "C" fn resize_callback(window: *mut glfw_raw::GLFWwindow, width: c_int, height: c_int) {
-    let gl_draw;
-    unsafe {
-        gl_draw = GL_DRAW.as_mut().unwrap();
-    }
+    let gl_draw = unsafe { inner_gl_unsafe() };
     let window_ptr = window;
     let window_id = unsafe { glfw_raw::glfwGetWindowUserPointer(window) };
     let window = gl_draw.windows[window_id as usize].as_mut().unwrap();
@@ -555,7 +716,6 @@ extern "C" fn resize_callback(window: *mut glfw_raw::GLFWwindow, width: c_int, h
 
     unsafe {
         glfw_raw::glfwMakeContextCurrent(window_ptr);
-        // gl::Viewport(0, 0, width, height);
         gl::Viewport(viewport.0, viewport.1, viewport.2, viewport.3);
     }
 }
@@ -566,6 +726,7 @@ extern "C" fn error_callback(code: c_int, _: *const i8) {
 
 pub struct GlWindow {
     id: u32,
+    ptr: *mut glfw_raw::GLFWwindow,
     // rc::Rc is a non-send non-sync type
     phantom: PhantomData<std::rc::Rc<()>>,
 }
@@ -574,7 +735,7 @@ pub struct GlWindow {
 // https://github.com/rust-lang/rfcs/issues/1215
 macro_rules! check_window {
     ($id:expr, $gl_draw:ident, $window:ident) => {
-        let $gl_draw = unsafe { GL_DRAW.as_mut().unwrap() };
+        let $gl_draw = unsafe { inner_gl_unsafe() };
         if $gl_draw.current_window != $id {
             $gl_draw.use_window($id);
         }
@@ -663,7 +824,7 @@ impl GlWindow {
             gl::ActiveTexture(
                 gl::TEXTURE0, /* + gl_draw.tex_shader_uniform_locations[1] as u32*/
             );
-            gl::BindTexture(gl::TEXTURE_2D, image.gl_texture);
+            gl::BindTexture(gl::TEXTURE_2D, image.get_image());
 
             gl::BindVertexArray(gl_draw.current_draw_vao);
 
@@ -716,25 +877,31 @@ impl GlWindow {
     /// uis, etc.
     ///
     /// The position (0.0, 0.0) will give the coordinates of the bottom left corner of the window,
-    /// and the position (1.0, 1.0) will give the coordinates of the bottom right cornder of the window.
+    /// and the position (1.0, 1.0) will give the coordinates of the top right cornder of the window.
     pub fn get_window_pos(&self, x: f32, y: f32) -> (f32, f32) {
-        let gl_draw = unsafe { GL_DRAW.as_ref().unwrap() };
+        let gl_draw = unsafe { inner_gl_unsafe_static() };
         let window = gl_draw.windows[self.id as usize].as_ref().unwrap();
         window
             .coordinate_space
             .get_window_pos(x, y, window.width, window.height, window.scale)
     }
+
+    /// Closes the window. Note that a window is automatically closed when dropped, so this function
+    /// doesn't do anything other than calling the destructor.
+    pub fn close(self) {}
 }
 
 impl Drop for GlWindow {
     fn drop(&mut self) {
-        let gl_draw;
-        // gl windows aren't send so they can only be dropped on the thread
-        // that owns the gl draw (should be the main thread)
+        let gl_draw = unsafe { inner_gl_unsafe() };
+        if gl_draw.num_windows == 1 {
+            gl_draw.orphan_resources();
+        }
         unsafe {
-            gl_draw = GL_DRAW.as_mut().unwrap();
+            glfw_raw::glfwDestroyWindow(self.ptr);
         }
         let mut window = None;
+        gl_draw.num_windows -= 1;
         std::mem::swap(&mut gl_draw.windows[self.id as usize], &mut window);
     }
 }
