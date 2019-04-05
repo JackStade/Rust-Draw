@@ -251,6 +251,10 @@ pub enum DataType {
     Mat4x2,
     Mat4x3,
     Mat4x4,
+    Sampler2D,
+    IntSampler2D,
+    UIntSampler2D,
+    FloatSampler2D,
 }
 
 impl DataType {
@@ -277,6 +281,10 @@ impl DataType {
             DataType::Mat4x2 => "mat4x2",
             DataType::Mat4x3 => "mat4x3",
             DataType::Mat4x4 => "mat4x4",
+            DataType::Sampler2D => "sampler2D",
+            DataType::IntSampler2D => "isampler2D",
+            DataType::UIntSampler2D => "usampler2D",
+            DataType::FloatSampler2D => "fsampler2D",
         }
     }
 }
@@ -1566,14 +1574,15 @@ pub enum ItemRef {
 
 use ItemRef::{Expr, Static, Var};
 
-struct ProgramItem {
+/// An item that can be used as the data for a shader argument.
+pub(crate) struct ProgramItem {
     data: Cell<VarString>,
     ref_type: Cell<ItemRef>,
     ty: DataType,
 }
 
 impl ProgramItem {
-    fn create(data: VarString, ty: DataType) -> ProgramItem {
+    pub fn create(data: VarString, ty: DataType) -> ProgramItem {
         ProgramItem {
             data: Cell::new(data),
             ref_type: Cell::new(Static),
@@ -1581,12 +1590,16 @@ impl ProgramItem {
         }
     }
 
-    fn new(data: VarString, ty: DataType, r: ItemRef) -> ProgramItem {
+    pub fn new(data: VarString, ty: DataType, r: ItemRef) -> ProgramItem {
         ProgramItem {
             data: Cell::new(data),
             ref_type: Cell::new(r),
             ty: ty,
         }
+    }
+
+    pub fn into_inner(self) -> VarString {
+        self.data.into_inner()
     }
 }
 

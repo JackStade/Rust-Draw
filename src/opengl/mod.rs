@@ -33,7 +33,11 @@ use self::parking_lot::Mutex;
 #[allow(non_snake_case)]
 pub mod shader;
 
-static mut GL_DRAW: *mut GlDrawCore = 0 as *mut _ ;
+pub mod texture;
+
+use texture::{BindTexture, ImageData};
+
+static mut GL_DRAW: *mut GlDrawCore = 0 as *mut _;
 
 static mut DRAW_INIT: bool = false;
 
@@ -131,8 +135,20 @@ struct GlDrawCore {
     current_window: u32,
     root_window: *mut glfw_raw::GLFWwindow,
 
-    image_list: Vec<Option<GLuint>>,
-    orphan_textures: Vec<ImageData>,
+    // resources are objects that are shared between contexts, and have all relevant data stored
+    // on the gpu. When all windows are closed it is neccesary to "orphan" these resources by
+    // downloading the data to the cpu, so that the resources do not become invalid when a new window
+    // opened.
+    // These resources can only be used by functions that require a reference to a window, so
+    // while there are no windows opened the resources are technically invalid, but cannot be used
+    // during that time.
+    // 0 represents an open space, since opengl functions cannot return 0 as a name. This array cannot
+    // be reordered, since objects store references to the ids in it.
+    resource_list: Vec<GLuint>,
+    resource_search_start: usize,
+    // a list of the functions need to orphan/adopt each active resource
+    orphan_positions: Vec<GLuint>,
+    resource_orphans: Vec<DynResource>,
 
     // the buffers to be used for free drawing
     draw_buffers: [GLuint; NUM_DRAW_BUFFERS as usize],
@@ -159,8 +175,10 @@ impl GlDrawCore {
             current_window: 0,
             root_window: ptr::null_mut(),
 
-            image_list: Vec::new(),
-            orphan_textures: Vec::new(),
+            resource_list: Vec::new(),
+            resource_search_start: 0,
+            orphan_positions: Vec::new(),
+            resource_orphans: Vec::new(),
 
             draw_buffers: [0; NUM_DRAW_BUFFERS as usize],
             current_draw_vao: 0,
@@ -175,60 +193,74 @@ impl GlDrawCore {
 
     fn orphan_resources(&mut self) {
         self.init_gl = false;
-
-        for (i, s) in self.image_list.iter().enumerate() {
-            if let Some(tex) = s {
-                let mut w = 0u32;
-                let mut h = 0u32;
-                let buffer = unsafe {
-                    gl::BindTexture(gl::TEXTURE_2D, *tex);
-                    gl::GetTexLevelParameteriv(
-                        gl::TEXTURE_2D,
-                        0,
-                        gl::TEXTURE_WIDTH,
-                        &mut w as *mut _ as *mut _,
-                    );
-                    gl::GetTexLevelParameteriv(
-                        gl::TEXTURE_2D,
-                        0,
-                        gl::TEXTURE_WIDTH,
-                        &mut h as *mut _ as *mut _,
-                    );
-                    let mut buffer = Vec::with_capacity((w * h) as usize);
-                    buffer.set_len((w * h) as usize);
-                    gl::GetTexImage(
-                        gl::TEXTURE_2D,
-                        0,
-                        gl::RGBA,
-                        gl::UNSIGNED_BYTE,
-                        buffer.as_ptr() as *mut _,
-                    );
-                    buffer
-                };
-                self.orphan_textures.push(ImageData {
-                    data: buffer,
-                    image_id: i as u32,
-                    width: w,
-                    height: h,
-                });
+        for r in self.resource_orphans.iter_mut() {
+            unsafe {
+                r.orphan();
             }
         }
     }
 
-    fn image(&mut self, image_id: GLuint) -> u32 {
+    // note that a window is required in order to create new resources, so it is not
+    // possible to create a resource in an orphan state
+    fn get_resource_id(
+        &mut self,
+        name: GLuint,
+        adopt_ptr: unsafe fn(*mut (), u32),
+        drop_ptr: unsafe fn(*mut (), u32),
+        orphan_ptr: fn(u32) -> *mut (),
+    ) -> u32 {
         let mut found = None;
-        for (i, slot) in self.image_list.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(image_id);
-                found = Some(i);
+        let mut low_space = self.resource_search_start;
+        for slot in self.resource_list[low_space..].iter_mut() {
+            low_space += 1;
+            if *slot == 0 {
+                *slot = name;
+                self.orphan_positions[low_space] = self.resource_orphans.len() as u32;
+                found = Some(low_space);
                 break;
             }
         }
+        self.resource_search_start = low_space;
+
         if found.is_none() {
-            found = Some(self.image_list.len());
-            self.image_list.push(Some(image_id));
+            found = Some(self.resource_list.len());
+            self.resource_list.push(name);
+            self.orphan_positions
+                .push(self.resource_orphans.len() as u32);
         }
-        found.unwrap() as u32
+        let found = found.unwrap();
+        self.resource_orphans.push(DynResource {
+            id: found as u32,
+            ptr: 0 as *mut _,
+            adopt_ptr: adopt_ptr,
+            drop_ptr: drop_ptr,
+            orphan_ptr: orphan_ptr,
+        });
+        // this is theoretically a potential saftey violation, but all implementations will
+        // crash long before the number of resources reaches 2^32
+        found as u32
+    }
+
+    fn remove_resource(&mut self, id: u32) {
+        let id = id as usize;
+        if id < self.resource_search_start {
+            self.resource_search_start = id;
+        }
+        self.resource_list[id] = 0;
+        let pos = self.orphan_positions[id];
+        if self.num_windows == 0 {
+            unsafe { self.resource_orphans[pos as usize].drop_when_orphaned() };
+        }
+
+        self.resource_orphans.swap_remove(pos as usize);
+
+        // the previous last value is now in this position
+        // if the value being removed is the last value in the array
+        if (pos as usize) < self.resource_orphans.len() {
+            let swap_id = self.resource_orphans[pos as usize].id;
+            // update the indirect list
+            self.orphan_positions[swap_id as usize] = pos;
+        }
     }
 
     fn use_window(&mut self, window_id: u32) {
@@ -238,6 +270,49 @@ impl GlDrawCore {
         }
         self.current_window = window_id;
         self.current_draw_vao = window.vao;
+    }
+}
+
+pub trait GlResource {
+    unsafe fn adopt(ptr: *mut (), id: u32);
+
+    unsafe fn drop_while_orphaned(ptr: *mut (), id: u32);
+
+    fn orphan(id: u32) -> *mut ();
+}
+
+// note: this type has implicit state. It is either in an orphan state
+// or an active state. In an orphan state, ptr will contain data needed
+// to reinitialzed the resource. In an active state, the pointer is invalid.
+// this state is not stored in the object because it is assumed to be implied by
+// the state of GlDrawCore
+struct DynResource {
+    id: u32,
+    // in an orphaned state, this pointer will point to the data needed
+    // otherwise, it will not be assumed to be unsafe
+    // note that the pointer must be mutable in order to drop the memory
+    // referenced by it
+    ptr: *mut (),
+    adopt_ptr: unsafe fn(*mut (), u32),
+    drop_ptr: unsafe fn(*mut (), u32),
+    orphan_ptr: fn(u32) -> *mut (),
+}
+
+impl DynResource {
+    unsafe fn drop_when_orphaned(&self) {
+        (self.drop_ptr)(self.ptr, self.id)
+        // ptr is no longer valid
+    }
+
+    unsafe fn orphan(&mut self) {
+        // ptr is invalid
+        self.ptr = (self.orphan_ptr)(self.id);
+        // ptr is now valid
+    }
+
+    unsafe fn adopt(&self) {
+        (self.adopt_ptr)(self.ptr, self.id);
+        // ptr is no longer valid
     }
 }
 
@@ -287,44 +362,6 @@ impl WindowCore {
     }
 }
 
-struct ImageData {
-    // most opengl functions prefer 4-aligned buffers
-    data: Vec<u32>,
-    image_id: u32,
-
-    width: u32,
-    height: u32,
-}
-
-impl ImageData {
-    fn load(self) {
-        let mut tex = 0;
-        unsafe {
-            gl::GenTextures(1, &mut tex);
-            gl::BindTexture(gl::TEXTURE_2D, tex);
-            gl::PixelStorei(gl::UNPACK_ALIGNMENT, 4);
-            gl::TexImage2D(
-                gl::TEXTURE_2D,
-                0,
-                // more formats might be possible in the future
-                gl::RGBA8 as i32,
-                self.width as i32,
-                self.height as i32,
-                0,
-                gl::RGBA,
-                gl::UNSIGNED_BYTE,
-                self.data.as_ptr() as *const _,
-            );
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
-        }
-
-        // load will only be called on the main thread
-        let gl_draw = unsafe { inner_gl_unsafe() };
-        gl_draw.image_list[self.image_id as usize] = Some(tex);
-    }
-}
-
 /// A handle that represents the global state of GLFW
 pub struct GlDraw {
     // rc::Rc makes this type non-send and non-sync
@@ -333,23 +370,6 @@ pub struct GlDraw {
 
 impl Drop for GlDraw {
     fn drop(&mut self) {}
-}
-
-pub struct GlImage {
-    image_id: u32,
-
-    width: u32,
-    height: u32,
-    // images cannot be send or sync because they should not be dropped
-    // on a different thread
-    phantom: PhantomData<std::rc::Rc<()>>,
-}
-
-impl GlImage {
-    fn get_image(&self) -> GLuint {
-        let gl_draw = unsafe { inner_gl_unsafe() };
-        gl_draw.image_list[self.image_id as usize].unwrap()
-    }
 }
 
 impl GlDraw {
@@ -433,8 +453,9 @@ impl GlDraw {
             gl_draw.color_shader = color_shader;
             gl_draw.tex_shader = tex_shader;
 
-            while let Some(orphan) = gl_draw.orphan_textures.pop() {
-                orphan.load();
+            for r in gl_draw.resource_orphans.iter_mut() {
+                // this is the correct place to call adopt
+                unsafe { r.adopt() }
             }
 
             gl_draw.init_gl = true;
@@ -505,7 +526,7 @@ impl GlDraw {
         }
     }
 
-    pub fn load_image(&mut self, width: u32, height: u32, bytes: &[u8]) -> GlImage {
+    /* pub fn load_image(&mut self, width: u32, height: u32, bytes: &[u8]) -> GlImage {
         if bytes.len() < (4 * width * height) as usize {
             panic!("Slice provided is not long enough for an image of size {}x{}, must be at least {} bytes.", width, height, width * height * 4);
         };
@@ -568,7 +589,7 @@ impl GlDraw {
             height: height,
             phantom: PhantomData,
         }
-    }
+    }*/
 
     /// Draws the specified window. When there are multiple windows, it is reccomended to use draw_all
     pub fn draw(&mut self, window: &GlWindow) {
@@ -791,7 +812,12 @@ impl GlWindow {
     }
 
     /// Draws an image. Note that the image may be inverted in some coordinate systems.
-    pub fn draw_image(&mut self, image: &GlImage, start: (f32, f32), end: (f32, f32)) {
+    pub fn draw_image(
+        &mut self,
+        image: &texture::Texture2D<texture::TextureData<texture::RGBA, u8>>,
+        start: (f32, f32),
+        end: (f32, f32),
+    ) {
         check_window!(self.id, gl_draw, window);
 
         let shader = gl_draw.tex_shader;
@@ -824,7 +850,7 @@ impl GlWindow {
             gl::ActiveTexture(
                 gl::TEXTURE0, /* + gl_draw.tex_shader_uniform_locations[1] as u32*/
             );
-            gl::BindTexture(gl::TEXTURE_2D, image.get_image());
+            gl::BindTexture(gl::TEXTURE_2D, gl_draw.resource_list[image.get_id() as usize]);
 
             gl::BindVertexArray(gl_draw.current_draw_vao);
 
