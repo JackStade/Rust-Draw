@@ -1,4 +1,4 @@
 .DS_Store
-/src/bin/
+src/bin/test.rs
 /target/
 /Cargo.lock
