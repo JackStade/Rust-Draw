@@ -703,10 +703,131 @@ impl fmt::Display for VarType {
     }
 }
 
+use super::GlResource;
+
 pub struct ShaderProgram<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> {
     uniform_locations: Vec<GLint>,
-    program: GLuint,
-    phantom: PhantomData<(In, Uniforms, Out)>,
+    program_id: u32,
+    // need to make sure the type is not send or sync
+    phantom: PhantomData<(In, Uniforms, Out, std::rc::Rc<()>)>,
+}
+
+#[cfg(not(feature = "opengl41"))]
+impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
+    for ShaderProgram<In, Uniforms, Out>
+{
+    unsafe fn adopt(ptr: *mut (), id: u32) {
+        let b = unsafe { &mut *(ptr as *mut [CString; 2]) };
+        let gl_draw = unsafe { super::inner_gl_unsafe() };
+        // since the underlying gl is only passed a pointer and not the slice length,
+        // `as_bytes()` is equivalent to `as_bytes_with_nul()`
+        let program = get_program(b[0].as_bytes_with_nul(), b[1].as_bytes_with_nul());
+        gl_draw.resource_list[id as usize] = program;
+    }
+
+    unsafe fn drop_while_orphaned(ptr: *mut (), _id: u32) {
+        let b = unsafe { Box::from_raw(ptr as *mut [CString; 2]) };
+        // drop the box
+    }
+
+    unsafe fn cleanup(ptr: *mut (), _id: u32) {
+        let b = unsafe { Box::from_raw(ptr as *mut [CString; 2]) };
+        // drop the box
+    }
+
+    unsafe fn orphan(_id: u32, ptr: *mut ()) -> *mut () {
+        // nothing needs to be done here, the data is stored in the pointer regardless
+        // or orphan state
+        ptr
+    }
+}
+
+#[cfg(feature = "opengl41")]
+impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
+    for ShaderProgram<In, Uniforms, Out>
+{
+    unsafe fn adopt(ptr: *mut (), id: u32) {
+        let gl_draw = unsafe { super::inner_gl_unsafe() };
+        let [data_len, format, drop_len] = ptr::read(ptr as *const [u32; 3]);
+        let ptr = ptr as *mut u32;
+        let program = gl::CreateProgram();
+        gl::ProgramBinary(program, format, ptr.offset(3) as *const _, data_len as i32);
+        gl_draw.resource_list[id as usize] = program;
+        let drop_vec = Vec::from_raw_parts(ptr, drop_len as usize, drop_len as usize);
+        // drop the data
+    }
+
+    unsafe fn drop_while_orphaned(ptr: *mut (), _id: u32) {
+        let [_, _, drop_len] = ptr::read(ptr as *const [u32; 3]);
+        let drop_vec = Vec::from_raw_parts(ptr, drop_len as usize, drop_len as usize);
+        // drop the data
+    }
+
+    unsafe fn cleanup(_ptr: *mut (), _id: u32) {
+        // nothing needs to be done here, since a shader does not
+        // store any data in the pointer when not in an orphan state
+    }
+
+    unsafe fn orphan(id: u32, _ptr: *mut ()) -> *mut () {
+        let gl_draw = unsafe { super::inner_gl_unsafe() };
+        let program = gl_draw.resource_list[id as usize];
+        let mut len = 0;
+        let mut format = 0;
+        gl::GetProgramiv(program, gl::PROGRAM_BINARY_LENGTH, &mut len);
+        // adding 3 to len rounds up if the binary length is not a multiple
+        // of 4
+        let mut buffer = Vec::<u32>::with_capacity(3 + (len as usize + 3) >> 2);
+        let mut data_len = 0;
+        let ptr = buffer.as_mut_ptr();
+        buffer.set_len(3);
+        gl::GetProgramBinary(
+            program,
+            len,
+            &mut data_len,
+            &mut format,
+            ptr.offset(3) as *mut _,
+        );
+        buffer[0] = data_len as u32;
+        buffer[1] = format;
+        buffer[2] = buffer.capacity() as u32;
+        std::mem::forget(buffer);
+        ptr as *mut ()
+    }
+}
+
+impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> ShaderProgram<In, Uniforms, Out> {
+    #[cfg(feature = "opengl41")]
+    fn new(
+        program: GLuint,
+        uniform_locations: Vec<GLint>,
+        _vsource: CString,
+        _fsource: CString,
+    ) -> ShaderProgram<In, Uniforms, Out> {
+        let gl_draw = unsafe { super::inner_gl_unsafe() };
+        ShaderProgram {
+            uniform_locations: uniform_locations,
+            program_id: gl_draw.get_resource_generic::<Self>(program, None),
+            phantom: PhantomData,
+        }
+    }
+
+    #[cfg(not(feature = "opengl41"))]
+    fn new(
+        program: GLuint,
+        uniform_locations: Vec<GLint>,
+        vsource: CString,
+        fsource: CString,
+    ) -> ShaderProgram<In, Uniforms, Out> {
+        let gl_draw = super::inner_gl_unsafe();
+        let b = Box::new([vsource, fsource]);
+        let ptr = b.as_mut_ptr();
+        mem::forget(b);
+        ShaderProgram {
+            uniform_locations: uniform_locations,
+            program_id: gl_draw.get_resource_generic::<Self>(program, Some(ptr)),
+            phantom: PhantomData,
+        }
+    }
 }
 
 /// Create a shader program with a vertex and a fragment shader.
@@ -729,7 +850,7 @@ pub fn create_program<
     Frag: Fn(FIn::AsVarying, PUniforms::AsUniform) -> FGenOut + Sync,
     Proto: ProgramPrototype<Uniforms, PUniforms, In, PIn, Out, POut, VOut, FIn>,
 >(
-    gl: &mut super::GlDraw,
+    window: &super::GlWindow,
     prototype: &Proto,
     vertex_shader_fn: Vert,
     fragment_shader_fn: Frag,
@@ -759,7 +880,19 @@ pub fn create_program<
         true,
     ))
     .unwrap();
-    let program = get_program(v_shader_string.as_bytes(), f_shader_string.as_bytes());
+    let program = get_program(
+        v_shader_string.as_bytes_with_nul(),
+        f_shader_string.as_bytes_with_nul(),
+    );
+    if cfg!(feature = "opengl41") {
+        unsafe {
+            gl::ProgramParameteri(
+                program,
+                gl::PROGRAM_BINARY_RETRIEVABLE_HINT,
+                gl::TRUE as i32,
+            );
+        }
+    }
 
     let mut uniform_locations = vec![0; Uniforms::NARGS];
     for i in 0..PUniforms::NARGS {
@@ -774,12 +907,7 @@ pub fn create_program<
             }
         }
     }
-
-    ShaderProgram {
-        uniform_locations: uniform_locations,
-        program: program,
-        phantom: PhantomData,
-    }
+    ShaderProgram::new(program, uniform_locations, v_shader_string, f_shader_string)
 }
 
 #[cfg(not(feature = "opengl41"))]
@@ -1833,13 +1961,26 @@ macro_rules! vec_swizzle {
     ($vec:ident,;$($types:ident,)*;$sz:ident,) => (
         #[cfg(feature = "opengl42")]
         impl<E: ExprType<$vec>> Map<$vec,$($types,)*swizzle::$sz> for E {
-            /// Applies a swizzle mask to the vector type. Note that this is only availible for
-            /// single item types when the opengl version is 4.2 or greater.
+            /// Applies a swizzle mask to the vector type.
             fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(&self, _mask: T) -> <Self as ExprCombine<T::Out>>::Min
             where Self: ExprCombine<T::Out> {
                 unsafe {
                     <Self as ExprCombine<T::Out>>::Min::from_t(
                         T::Out::create(var_format!("", ".", ""; self.clone().into_t().data.data.into_inner(), VarString::new(T::get_vars())), Expr)
+                    )
+                }
+            }
+        }
+
+        #[cfg(not(feature = "opengl42"))]
+        impl<E: ExprType<$vec>> Map<$vec,$($types,)*swizzle::$sz> for E {
+            /// Applies a swizzle mask to the vector type.
+            fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(&self, _mask: T) -> <Self as ExprCombine<T::Out>>::Min
+            where Self: ExprCombine<T::Out> {
+                unsafe {
+                    // convieniently, opengl allows syntax like `vec4(1.0)`
+                    <Self as ExprCombine<T::Out>>::Min::from_t(
+                        T::Out::create(var_format!("", "(", ")"; T::Out::data_type(), self.clone().into_t().data.data.into_inner(), Expr))
                     )
                 }
             }

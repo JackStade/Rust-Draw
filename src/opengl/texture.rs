@@ -1,4 +1,4 @@
-use super::{inner_gl, inner_gl_unsafe, GlDraw, GlDrawCore};
+use super::{inner_gl, inner_gl_unsafe, inner_gl_unsafe_static, GlDraw, GlDrawCore};
 use gl;
 use gl::types::*;
 use std::marker::PhantomData;
@@ -127,7 +127,8 @@ pub unsafe trait TextureFormat: TextureBufferType {
 /// * 'i8'
 /// * 'u16'
 /// * 'i16'
-/// Note that integer types longer than 16 bits are not supported.
+/// Note that integer types longer than 16 bits are not supported by OpenGL (this is likely because
+/// 32 bit normalized types cannot be represented losslessly with an f32)
 pub struct TextureData<C: TextureComponents, Data> {
     phantom: PhantomData<(C, Data)>,
 }
@@ -236,9 +237,7 @@ pub struct DepthStencil24_8 {
 }
 
 pub unsafe trait BindTexture<T> {
-    const TEX: GLenum;
-
-    fn get_id(&self) -> u32;
+    unsafe fn bind(&self);
 }
 
 use super::GlResource;
@@ -286,13 +285,18 @@ impl<F: TextureFormat> GlResource for Texture2D<F> {
         // the buffer is freed here
     }
 
-    unsafe fn drop_while_orphaned(ptr: *mut (), id: u32) {
+    unsafe fn drop_while_orphaned(ptr: *mut (), _id: u32) {
         let ptr = ptr as *mut u32;
         let [_, _, drop_len] = ptr::read(ptr as *const [u32; 3]);
         let drop_vec = Vec::from_raw_parts(ptr, drop_len as usize, drop_len as usize);
     }
 
-    fn orphan(id: u32) -> *mut () {
+    unsafe fn cleanup(_ptr: *mut (), _id: u32) {
+        // no cleanup is neccesary since textures do not store additional data when
+        // not in an orphan state
+    }
+
+    unsafe fn orphan(id: u32, _ptr: *mut ()) -> *mut () {
         let data_size = mem::size_of::<F::Data>();
         let num_comps = F::Components::COMPONENTS;
         let mut w = 0u32;
@@ -318,9 +322,11 @@ impl<F: TextureFormat> GlResource for Texture2D<F> {
         // adding 3 will round the size up if it is not already a multiple of 4
         let buffer_row_size = (row_size + 3) >> 2;
         let mut buff = Vec::<u32>::with_capacity(3 + buffer_row_size as usize * h as usize);
-        buff.push(w);
-        buff.push(h);
-        buff.push(buffer_row_size as u32 * h);
+        // cannot push here because rust could in theory reallocate
+        buff.set_len(3);
+        buff[0] = 0;
+        buff[1] = h;
+        buff[2] = buff.capacity() as u32;
         // into_orphan_data will only be called on the main thread with a context loaded
         unsafe {
             gl::PixelStorei(gl::PACK_ALIGNMENT, 4);
@@ -357,7 +363,7 @@ impl<F: TextureFormat> Texture2D<F> {
         unsafe {
             gl::GenTextures(1, &mut tex);
         }
-        id = gl_draw.get_resource_id(tex, Self::adopt, Self::drop_while_orphaned, Self::orphan);
+        id = gl_draw.get_resource_generic::<Self>(tex, None);
         unsafe {
             Self::load_image(
                 gl_draw,
@@ -408,10 +414,13 @@ impl<F: TextureFormat> Texture2D<F> {
 }
 
 unsafe impl<F: TextureFormat> BindTexture<F::Texture2D> for Texture2D<F> {
-    const TEX: GLenum = gl::TEXTURE_2D;
+    unsafe fn bind(&self) {
+        let gl_draw = unsafe { inner_gl_unsafe_static() };
 
-    fn get_id(&self) -> u32 {
-        self.image_id
+        gl::BindTexture(
+            gl::TEXTURE_2D,
+            gl_draw.resource_list[self.image_id as usize],
+        );
     }
 }
 
@@ -448,6 +457,6 @@ macro_rules! sampler {
 use super::shader::{traits::ArgType, DataType, ItemRef, ProgramItem, VarString};
 
 sampler!(Sampler2D, DataType::Sampler2D);
-sampler!(IntSampler2D, DataType::Sampler2D);
-sampler!(UIntSampler2D, DataType::Sampler2D);
-sampler!(FloatSampler2D, DataType::Sampler2D);
+sampler!(IntSampler2D, DataType::IntSampler2D);
+sampler!(UIntSampler2D, DataType::UIntSampler2D);
+sampler!(FloatSampler2D, DataType::FloatSampler2D);

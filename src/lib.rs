@@ -18,7 +18,10 @@ use shader::traits::{Constant, ExprMin, IntoArgs, Varying};
 use std::time::{Duration, Instant};
 use swizzle::SwizzleInPlace;
 
-/// A coordinate space. Unless otherwise stated, up is positive y and positive z is coming out of the screen.
+/// A coordinate space.
+///
+/// Unless otherwise stated, up is positive y and positive z is coming out of the screen.
+/// Positive x is always from left to right.
 #[derive(Clone, Copy)]
 pub enum CoordinateSpace {
     /// The coordinate origin is the center of the window. One unit is one pixel.
@@ -33,39 +36,17 @@ pub enum CoordinateSpace {
     WindowTopLeft,
     /// The coordinate origin is the bottom left. One unit in any direction reaches the edges of the window.
     WindowBottomLeft,
-    /// The viewport is a 1x1 unit square with size equal to the width of the window. Origin is the center.
-    ///
-    /// Note that `WindowWidth`, `WindowHeight`, `SquareFill`, and `SquareFit` can cut off a portion of the screen.
+    /// The viewport is a 2x2 unit square with size equal to the width of the window. Origin is the center.
     WindowWidth,
-    /// The viewport is a 1x1 unit square with size equal to the height of the window. Origin is the center.
-    ///
-    /// Note that `WindowWidth`, `WindowHeight`, `SquareFill`, and `SquareFit` can cut off a portion of the screen.
+    /// The viewport is a 2x2 unit square with size equal to the height of the window. Origin is the center.
     WindowHeight,
-    /// The viewport is a 1x1 unit square size equal to max(width, height)
-    ///
-    /// Note that `WindowWidth`, `WindowHeight`, `SquareFill`, and `SquareFit` can cut off a portion of the screen.
+    /// The viewport is a 2x2 unit square size equal to max(width, height). Origin is the center.
     SquareFill,
-    /// The viewport is a 1x1 unit square with size equal to min(width, height)
-    ///
-    /// Note that `WindowWidth`, `WindowHeight`, `SquareFill`, and `SquareFit` can cut off a portion of the screen.
+    /// The viewport is a 2x2 unit square with size equal to min(width, height). Origin is the center.
     SquareFit,
 }
 
 impl CoordinateSpace {
-    fn get_viewport(&self, width: i32, height: i32, scale: i32) -> (i32, i32, i32, i32) {
-        let width = width * scale;
-        let height = height * scale;
-        let max = width.max(height);
-        let min = width.min(height);
-        match self {
-            CoordinateSpace::WindowWidth => (0, (height - width) / 2, width, width),
-            CoordinateSpace::WindowHeight => ((width - height) / 2, 0, height, height),
-            CoordinateSpace::SquareFill => ((width - max) / 2, (height - max) / 2, max, max),
-            CoordinateSpace::SquareFit => ((width - min) / 2, (height - min) / 2, min, min),
-            _ => (0, 0, width, height),
-        }
-    }
-
     fn get_matrix(&self, width: i32, height: i32, scale: i32) -> na::Matrix4<f32> {
         let (diag, homo) = self.get_transform_data(width, height, scale);
         // column-major matrix
@@ -96,93 +77,17 @@ impl CoordinateSpace {
                 [scale / width, scale / height, 2.0 * scale / max],
                 [-1.0, -1.0, 0.0],
             ),
+            CoordinateSpace::WindowCenter => ([1.0, 1.0, 1.0], [0.0, 0.0, 0.0]),
             CoordinateSpace::WindowTopLeft => ([2.0, -2.0, 1.0], [-1.0, 1.0, 1.0]),
             CoordinateSpace::WindowBottomLeft => ([2.0, 2.0, 1.0], [-1.0, -1.0, 1.0]),
-            _ => ([1.0, 1.0, 1.0], [0.0, 0.0, 0.0]),
+            CoordinateSpace::WindowWidth => ([1.0, width / height, 1.0], [0.0, 0.0, 0.0]),
+            CoordinateSpace::WindowHeight => ([height / width, 1.0, 1.0], [0.0, 0.0, 0.0]),
+            CoordinateSpace::SquareFit => ([min / width, min / height, 1.0], [0.0, 0.0, 0.0]),
+            CoordinateSpace::SquareFill => ([max / width, max / height, 1.0], [0.0, 0.0, 0.0]),
         };
         (diag, homo)
     }
-
-    // Gets a position on the window. (0.0, 0.0) is bottom left and (1.0, 1.0) is top right
-    fn get_window_pos(&self, x: f32, y: f32, width: i32, height: i32, scale: i32) -> (f32, f32) {
-        let (diag, homo) = self.get_transform_data(width, height, scale);
-        let viewport = self.get_viewport(width, height, scale);
-        let viewport = (
-            viewport.0 as f32,
-            viewport.1 as f32,
-            viewport.2 as f32,
-            viewport.3 as f32,
-        );
-        let width = width as f32 * scale as f32;
-        let height = height as f32 * scale as f32;
-        let px = x * width;
-        let py = y * height;
-        let viewport_position = (px - viewport.0, py - viewport.1);
-        let pos = (
-            viewport_position.0 / viewport.2,
-            viewport_position.1 / viewport.3,
-        );
-        let pos = (pos.0 * 2.0 - 1.0, pos.1 * 2.0 - 1.0);
-        let pos = ((pos.0 - homo[0]) / diag[0], (pos.1 - homo[1]) / diag[1]);
-        pos
-    }
-
-    // Gets a position on the viewport without applying the matrix inverse
-    fn get_viewport_pos(&self, x: f32, y: f32, width: i32, height: i32, scale: i32) -> (f32, f32) {
-        let (diag, homo) = self.get_transform_data(width, height, scale);
-        let viewport = self.get_viewport(width, height, scale);
-        let viewport = (
-            viewport.0 as f32,
-            viewport.1 as f32,
-            viewport.2 as f32,
-            viewport.3 as f32,
-        );
-        let width = width as f32 * scale as f32;
-        let height = height as f32 * scale as f32;
-        let px = x * width;
-        let py = y * height;
-        let viewport_position = (px - viewport.0, py - viewport.1);
-        let pos = (
-            viewport_position.0 / viewport.2,
-            viewport_position.1 / viewport.3,
-        );
-        pos
-    }
 }
-
-/// A type specifying how to interpret mesh data
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub enum VertexDataType {
-    Float,
-    IntU8,
-    IntI8,
-    IntU16,
-    IntI16,
-    IntU32,
-    IntI32,
-    NormU8,
-    NormI8,
-    NormU16,
-    NormI16,
-    /// Note: normalizing 32 bit integers causes significant precision loss
-    NormU32,
-    NormI32,
-}
-
-pub trait Drawer {
-    type Window: RenderWindow;
-
-    /// Create a new window.
-    fn new_window(&mut self, width: u32, height: u32) -> Self::Window;
-
-    fn max_windows(&self) -> usize;
-
-    /// Draws the window, updating the framebuffer in the window. The window will not
-    /// be updated until this is called.
-    fn draw(&mut self);
-}
-
-pub trait RenderWindow {}
 
 pub struct Triangle3D {
     verts: [f32; 9],
