@@ -1,6 +1,5 @@
 use self::traits::*;
 use std::cell::Cell;
-use std::cmp;
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::fmt;
@@ -238,6 +237,10 @@ pub enum DataType {
     Int2,
     Int3,
     Int4,
+    UInt,
+    UInt2,
+    UInt3,
+    UInt4,
     Boolean,
     Boolean2,
     Boolean3,
@@ -268,6 +271,10 @@ impl DataType {
             DataType::Int2 => "ivec2",
             DataType::Int3 => "ivec3",
             DataType::Int4 => "ivec4",
+            DataType::UInt => "uint",
+            DataType::UInt2 => "uvec2",
+            DataType::UInt3 => "uvec3",
+            DataType::UInt4 => "uvec4",
             DataType::Boolean => "bool",
             DataType::Boolean2 => "bvec2",
             DataType::Boolean3 => "bvec3",
@@ -437,7 +444,7 @@ unsafe impl<
     for FullPrototype<U, I, P, O, UB, IB, VertPB, FragPB, OB>
 {
     fn uniforms(i: usize) -> VarType {
-        if (i < UB::LEN) {
+        if i < UB::LEN {
             VarType::Internal(UB::get_name(i))
         } else {
             VarType::Declare("u", i - UB::LEN)
@@ -445,7 +452,7 @@ unsafe impl<
     }
 
     fn vert_inputs(i: usize) -> VarType {
-        if (i < IB::LEN) {
+        if i < IB::LEN {
             VarType::Internal(IB::get_name(i))
         } else {
             VarType::Declare("i", i - IB::LEN)
@@ -453,7 +460,7 @@ unsafe impl<
     }
 
     fn vert_outputs(i: usize) -> VarType {
-        if (i < VertPB::LEN) {
+        if i < VertPB::LEN {
             VarType::Internal(VertPB::get_name(i))
         } else {
             VarType::Declare("p", i - VertPB::LEN)
@@ -461,7 +468,7 @@ unsafe impl<
     }
 
     fn frag_inputs(i: usize) -> VarType {
-        if (i < FragPB::LEN) {
+        if i < FragPB::LEN {
             VarType::Internal(FragPB::get_name(i))
         } else {
             VarType::Declare("p", i - FragPB::LEN)
@@ -469,7 +476,7 @@ unsafe impl<
     }
 
     fn frag_outputs(i: usize) -> VarType {
-        if (i < OB::LEN) {
+        if i < OB::LEN {
             VarType::Internal(OB::get_name(i))
         } else {
             VarType::Declare("o", i - OB::LEN)
@@ -490,6 +497,7 @@ impl<U: ShaderArgs, I: ShaderArgs, P: ShaderArgs, O: ShaderArgs> ShaderParamSet<
     }
 }
 
+#[allow(unused)]
 pub fn full_prototype<
     U: ShaderArgs,
     I: ShaderArgsClass<InterfaceArgs>,
@@ -526,7 +534,7 @@ pub fn depth_prototype<
     P: ShaderArgsClass<TransparentArgs>,
     O: ShaderArgsClass<InterfaceArgs>,
 >(
-    set: ShaderParamSet<U, I, P, O>,
+    _set: ShaderParamSet<U, I, P, O>,
 ) -> FullPrototype<
     U,
     I,
@@ -548,6 +556,7 @@ where
     }
 }
 
+#[allow(unused)]
 pub mod builtin_vars {
     use super::{ArgType, ShaderArgs};
     use super::{Float, Float2, Float3, Float4, Int};
@@ -716,13 +725,14 @@ pub struct ShaderProgram<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> 
 impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
     for ShaderProgram<In, Uniforms, Out>
 {
-    unsafe fn adopt(ptr: *mut (), id: u32) {
+    unsafe fn adopt(ptr: *mut (), id: u32) -> Option<*mut ()> {
         let b = unsafe { &mut *(ptr as *mut [CString; 2]) };
         let gl_draw = unsafe { super::inner_gl_unsafe() };
         // since the underlying gl is only passed a pointer and not the slice length,
         // `as_bytes()` is equivalent to `as_bytes_with_nul()`
         let program = get_program(b[0].as_bytes_with_nul(), b[1].as_bytes_with_nul());
         gl_draw.resource_list[id as usize] = program;
+        None
     }
 
     unsafe fn drop_while_orphaned(ptr: *mut (), _id: u32) {
@@ -746,20 +756,21 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
 impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
     for ShaderProgram<In, Uniforms, Out>
 {
-    unsafe fn adopt(ptr: *mut (), id: u32) {
-        let gl_draw = unsafe { super::inner_gl_unsafe() };
+    unsafe fn adopt(ptr: *mut (), id: u32) -> Option<*mut ()> {
+        let gl_draw = super::inner_gl_unsafe();
         let [data_len, format, drop_len] = ptr::read(ptr as *const [u32; 3]);
         let ptr = ptr as *mut u32;
         let program = gl::CreateProgram();
         gl::ProgramBinary(program, format, ptr.offset(3) as *const _, data_len as i32);
         gl_draw.resource_list[id as usize] = program;
-        let drop_vec = Vec::from_raw_parts(ptr, drop_len as usize, drop_len as usize);
+        let _drop_vec = Vec::from_raw_parts(ptr, drop_len as usize, drop_len as usize);
         // drop the data
+        None
     }
 
     unsafe fn drop_while_orphaned(ptr: *mut (), _id: u32) {
         let [_, _, drop_len] = ptr::read(ptr as *const [u32; 3]);
-        let drop_vec = Vec::from_raw_parts(ptr, drop_len as usize, drop_len as usize);
+        let _drop_vec = Vec::from_raw_parts(ptr, drop_len as usize, drop_len as usize);
         // drop the data
     }
 
@@ -769,7 +780,7 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
     }
 
     unsafe fn orphan(id: u32, _ptr: *mut ()) -> *mut () {
-        let gl_draw = unsafe { super::inner_gl_unsafe() };
+        let gl_draw = super::inner_gl_unsafe();
         let program = gl_draw.resource_list[id as usize];
         let mut len = 0;
         let mut format = 0;
@@ -850,8 +861,8 @@ pub fn create_program<
     Frag: Fn(FIn::AsVarying, PUniforms::AsUniform) -> FGenOut + Sync,
     Proto: ProgramPrototype<Uniforms, PUniforms, In, PIn, Out, POut, VOut, FIn>,
 >(
-    window: &super::GlWindow,
-    prototype: &Proto,
+    _window: &super::GlWindow,
+    _prototype: &Proto,
     vertex_shader_fn: Vert,
     fragment_shader_fn: Frag,
 ) -> ShaderProgram<In, Uniforms, Out> {
@@ -969,7 +980,7 @@ fn create_shader_string<
     shader = format!("{}\n", shader);
     let uniform_args = Uniforms::map_args().args;
     for i in 0..Uniforms::NARGS {
-        if let VarType::Declare(_, n) = uniform_names(i) {
+        if let VarType::Declare(_, _) = uniform_names(i) {
             shader = format!(
                 "{}uniform {} {};\n",
                 shader,
@@ -1218,10 +1229,43 @@ pub mod api {
     pub use super::{Int2Arg, Int3Arg, Int4Arg, IntArg};
 }
 
+#[allow(unused, unused_parens)]
 pub mod traits {
     use super::swizzle::SwizzleMask;
     use super::{DataType, ItemRef, ShaderArgDataList, ShaderArgList, VarExpr, VarString, VarType};
     use std::ops::{Add, Div, Mul, Neg, Sub};
+
+    pub unsafe trait GlDataType: Copy {
+        const TYPE: gl::types::GLenum;
+    }
+
+    unsafe impl GlDataType for u8 {
+        const TYPE: gl::types::GLenum = gl::UNSIGNED_BYTE;
+    }
+
+    unsafe impl GlDataType for i8 {
+        const TYPE: gl::types::GLenum = gl::BYTE;
+    }
+
+    unsafe impl GlDataType for u16 {
+        const TYPE: gl::types::GLenum = gl::UNSIGNED_SHORT;
+    }
+
+    unsafe impl GlDataType for i16 {
+        const TYPE: gl::types::GLenum = gl::SHORT;
+    }
+
+    unsafe impl GlDataType for u32 {
+        const TYPE: gl::types::GLenum = gl::UNSIGNED_INT;
+    }
+
+    unsafe impl GlDataType for i32 {
+        const TYPE: gl::types::GLenum = gl::INT;
+    }
+
+    unsafe impl GlDataType for f32 {
+        const TYPE: gl::types::GLenum = gl::FLOAT;
+    }
 
     pub unsafe trait ArgType: Clone {
         /// Do not call this function.
@@ -1876,6 +1920,7 @@ macro_rules! vec_type {
 macro_rules! subs {
 	($trait:ident, $vec:ident, $vec_type:ident;$($start:ident,)*;) => (
 		unsafe impl Construct<$vec_type> for ($($start),*) {
+            #[allow(unused_parens)]
 			fn as_arg(self) -> $vec_type {
 				match_from!(self, $($start,)*;u1, u2, u3, u4,;);
                 $vec_type::new(var_format!("", "(", ")"; VarString::new($vec_type::data_type().gl_type()),
@@ -2012,6 +2057,7 @@ macro_rules! vec_litteral {
         unsafe impl $a0 for tup!($t0,$($t,)*) {
             type Out = Constant<$v0>;
 
+            #[allow(unused_parens)]
             fn $f0(self) -> Constant<$v0> {
                 let tup!($f0,$($f,)*) = self;
                 Constant {
@@ -2043,12 +2089,6 @@ macro_rules! last {
     )
 }
 
-macro_rules! first {
-    ($arg:ident, $($args:ident,)*) => {
-        $arg
-    };
-}
-
 macro_rules! create_vec {
     ($ty:ty, $suffix:expr, $($obj:ident),*; $($func:ident),*; $($arg:ident),*) => {
         vec_types!($($obj,)*;$($func,)*;$($arg,)*);
@@ -2064,6 +2104,10 @@ create_vec!(f32, "", Float4, Float3, Float2, Float;
 create_vec!(i32, "", Int4, Int3, Int2, Int;
     int4, int3, int2, int;
     Int4Arg, Int3Arg, Int2Arg, IntArg);
+
+create_vec!(u32, "", UInt4, UInt3, UInt2, UInt;
+    uint4, uint3, uint2, uint;
+    UInt4Arg, UInt3Arg, UInt2Arg, UIntArg);
 
 create_vec!(bool, "", Boolean4, Boolean3, Boolean2, Boolean;
     boolean4, boolean3, boolean2, boolean;

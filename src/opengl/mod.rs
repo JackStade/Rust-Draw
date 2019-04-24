@@ -6,14 +6,12 @@ use nalgebra as na;
 use std::cell::Cell;
 use std::ffi::CString;
 use std::fmt;
-use std::fs::File;
 use std::marker::PhantomData;
 use std::mem;
 use std::os::raw::{c_int, c_void};
 use std::ptr;
 use std::result::Result;
 use std::str;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, ATOMIC_BOOL_INIT, ATOMIC_USIZE_INIT};
 use std::sync::mpsc::Receiver;
 use std::thread;
 
@@ -22,8 +20,6 @@ use crate::CoordinateSpace;
 
 use self::gl::types::*;
 use self::glfw::ffi as glfw_raw;
-// parking lot's mutexes are much faster than the standard library ones
-use self::parking_lot::Mutex;
 
 /// The shader module contains lower level functions for creating and using shaders.
 /// This is an advanced feature that can be difficult to use correctly.
@@ -36,18 +32,18 @@ pub mod shader;
 
 pub mod texture;
 
-use texture::{BindTexture, ImageData};
+pub mod mesh;
 
 static mut GL_DRAW: *mut GlDrawCore = 0 as *mut _;
 
 static mut WINDOW_GLOBAL: WindowGlobal = WindowGlobal {
     num_windows: 0,
     total_windows: 0,
-    current_window: 0,
-    root_window: 0 as *mut _,
 };
 
 static mut DRAW_INIT: bool = false;
+
+static mut GLFW_INIT: bool = false;
 
 #[inline(always)]
 fn inner_gl<'a>(_: &'a mut GlDraw) -> &'a mut GlDrawCore {
@@ -69,6 +65,27 @@ unsafe fn inner_gl_unsafe_static<'a>() -> &'a GlDrawCore {
     &*GL_DRAW
 }
 
+#[cfg(not(feature = "opengl41"))]
+const GL_VERSION: i32 = 0;
+
+#[cfg(all(not(feature = "opengl42"), feature = "opengl41"))]
+const GL_VERSION: i32 = 1;
+
+#[cfg(all(not(feature = "opengl43"), feature = "opengl42"))]
+const GL_VERSION: i32 = 2;
+
+#[cfg(all(not(feature = "opengl44"), feature = "opengl43"))]
+const GL_VERSION: i32 = 3;
+
+#[cfg(all(not(feature = "opengl45"), feature = "opengl44"))]
+const GL_VERSION: i32 = 4;
+
+#[cfg(all(not(feature = "opengl46"), feature = "opengl45"))]
+const GL_VERSION: i32 = 5;
+
+#[cfg(feature = "opengl46")]
+const GL_VERSION: i32 = 6;
+
 /// Initializes gl/glfw.
 ///
 /// When only using this library, calling this function is completely safe. However, the gl/glfw api
@@ -81,7 +98,7 @@ pub unsafe fn get_gl() -> Result<GlDraw, InitError> {
     } else {
         return Err(InitError::NonMainThread);
     }
-    let init = mem::replace(&mut DRAW_INIT, true);
+    let init = mem::replace(&mut GLFW_INIT, true);
     if init {
         return Err(InitError::AlreadyInitialized);
     }
@@ -89,23 +106,22 @@ pub unsafe fn get_gl() -> Result<GlDraw, InitError> {
     let draw_box = Box::new(GlDrawCore::new());
     GL_DRAW = Box::into_raw(draw_box);
 
-    unsafe {
-        if glfw_raw::glfwInit() == glfw_raw::TRUE {
-            // default opengl version
-            glfw_raw::glfwWindowHint(glfw_raw::CONTEXT_VERSION_MAJOR, 4);
-            glfw_raw::glfwWindowHint(glfw_raw::CONTEXT_VERSION_MINOR, 5);
-            // glfw options
-            glfw_raw::glfwWindowHint(glfw_raw::OPENGL_FORWARD_COMPAT, true as c_int);
-            glfw_raw::glfwWindowHint(
-                glfw_raw::OPENGL_PROFILE,
-                glfw::OpenGlProfileHint::Core as c_int,
-            );
-            glfw_raw::glfwWindowHint(glfw_raw::RESIZABLE, true as c_int);
-            glfw_raw::glfwSetErrorCallback(Some(error_callback));
-        } else {
-            return Err(InitError::GlfwError);
-        }
+    if glfw_raw::glfwInit() == glfw_raw::TRUE {
+        // default opengl version
+        glfw_raw::glfwWindowHint(glfw_raw::CONTEXT_VERSION_MAJOR, 4);
+        glfw_raw::glfwWindowHint(glfw_raw::CONTEXT_VERSION_MINOR, GL_VERSION);
+        // glfw options
+        glfw_raw::glfwWindowHint(glfw_raw::OPENGL_FORWARD_COMPAT, true as c_int);
+        glfw_raw::glfwWindowHint(
+            glfw_raw::OPENGL_PROFILE,
+            glfw::OpenGlProfileHint::Core as c_int,
+        );
+        glfw_raw::glfwWindowHint(glfw_raw::RESIZABLE, true as c_int);
+        glfw_raw::glfwSetErrorCallback(Some(error_callback));
+    } else {
+        return Err(InitError::GlfwError);
     }
+
     Ok(GlDraw {
         phantom: PhantomData,
     })
@@ -127,16 +143,9 @@ impl fmt::Debug for InitError {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct TexPtr {
-    unit: GLuint,
-}
-
 struct WindowGlobal {
     num_windows: usize,
     total_windows: u32,
-    current_window: u32,
-    root_window: *mut glfw_raw::GLFWwindow,
 }
 
 struct GlDrawCore {
@@ -154,6 +163,9 @@ struct GlDrawCore {
     orphan_positions: Vec<GLuint>,
     // a list of the functions need to orphan/adopt each active resource
     resource_orphans: Vec<DynResource>,
+
+    // a list of windows. This is used for resource sharing
+    windows: Vec<*mut glfw_raw::GLFWwindow>,
 }
 
 const NUM_DRAW_BUFFERS: i32 = 3;
@@ -178,6 +190,7 @@ impl GlDrawCore {
             resource_search_start: 0,
             orphan_positions: Vec::new(),
             resource_orphans: Vec::new(),
+            windows: Vec::new(),
         }
     }
 
@@ -209,7 +222,7 @@ impl GlDrawCore {
     fn get_resource_id(
         &mut self,
         name: GLuint,
-        adopt_ptr: unsafe fn(*mut (), u32),
+        adopt_ptr: unsafe fn(*mut (), u32) -> Option<*mut ()>,
         drop_ptr: unsafe fn(*mut (), u32),
         cleanup_ptr: unsafe fn(*mut (), u32),
         orphan_ptr: unsafe fn(u32, *mut ()) -> *mut (),
@@ -280,7 +293,7 @@ impl GlDrawCore {
 }
 
 pub trait GlResource {
-    unsafe fn adopt(ptr: *mut (), id: u32);
+    unsafe fn adopt(ptr: *mut (), id: u32) -> Option<*mut ()>;
 
     unsafe fn drop_while_orphaned(ptr: *mut (), id: u32);
 
@@ -295,7 +308,7 @@ pub trait GlResource {
 struct DynResource {
     id: u32,
     ptr: *mut (),
-    adopt_ptr: unsafe fn(*mut (), u32),
+    adopt_ptr: unsafe fn(*mut (), u32) -> Option<*mut ()>,
     drop_ptr: unsafe fn(*mut (), u32),
     cleanup_ptr: unsafe fn(*mut (), u32),
     orphan_ptr: unsafe fn(u32, *mut ()) -> *mut (),
@@ -311,7 +324,9 @@ impl DynResource {
     }
 
     unsafe fn adopt(&mut self) {
-        (self.adopt_ptr)(self.ptr, self.id);
+        if let Some(ptr) = (self.adopt_ptr)(self.ptr, self.id) {
+            self.ptr = ptr;
+        } // note: otherwise the pointer is left unchanged
     }
 
     unsafe fn cleanup(&mut self) {
@@ -337,21 +352,20 @@ impl GlDraw {
     /// open more than 10 or so may drastically reduce performance and may cause things to break.
     ///
     /// Having multiple windows in general is likely to be unstable.
-    pub fn new_window(
-        &mut self,
-        width: u32,
-        height: u32,
-        space: CoordinateSpace,
-        name: &str,
-    ) -> GlWindow {
+    pub fn new_window(&mut self, width: u32, height: u32, name: &str) -> GlWindow {
         let gl_draw = inner_gl(self);
+        let root_ptr = if gl_draw.windows.len() == 0 {
+            ptr::null_mut()
+        } else {
+            gl_draw.windows[0]
+        };
         let window_ptr = unsafe {
             let window = glfw_raw::glfwCreateWindow(
                 width as c_int,
                 height as c_int,
                 CString::new(name).unwrap().as_ptr(),
                 ptr::null_mut(),
-                WINDOW_GLOBAL.root_window,
+                root_ptr,
             );
             if window.is_null() {
                 panic!("GLFW failed to create window.");
@@ -430,12 +444,14 @@ impl GlDraw {
 
         let window_data = unsafe { &mut WINDOW_GLOBAL };
 
-        window_data.root_window = window_ptr;
+        gl_draw.windows.push(window_ptr);
+
         let mut vao = 0;
         unsafe {
             gl::GenVertexArrays(1, &mut vao);
         }
         window_data.total_windows += 1;
+        window_data.num_windows += 1;
         GlWindow {
             width: Cell::new(width as i32),
             height: Cell::new(height as i32),
@@ -447,8 +463,6 @@ impl GlDraw {
     }
 
     pub fn draw<'a>(&'a mut self, window: &GlWindow) {
-        let gl_draw = inner_gl(self);
-
         unsafe {
             glfw_raw::glfwSwapBuffers(window.ptr);
             glfw_raw::glfwPollEvents();
@@ -477,6 +491,7 @@ impl GlDraw {
     }
 }
 
+#[allow(unused)]
 extern "C" fn key_callback(
     window: *mut glfw_raw::GLFWwindow,
     key: c_int,
@@ -487,10 +502,12 @@ extern "C" fn key_callback(
     // not currently used
 }
 
+#[allow(unused)]
 extern "C" fn resize_callback(window: *mut glfw_raw::GLFWwindow, width: c_int, height: c_int) {
-    // not currently used 
+    // not currently used
 }
 
+#[allow(unused)]
 extern "C" fn error_callback(code: c_int, _: *const i8) {
     println!("GLFW Error: 0x{:X}", code);
 }
@@ -536,18 +553,28 @@ impl GlWindow {
 
     /// Closes the window. Note that a window is automatically closed when dropped, so this function
     /// doesn't do anything other than calling the destructor.
+    ///
+    /// Using this function can cause a window to close before resources are dropped. This is behavior
+    /// is not unsafe, but it causes data to be moved off to the graphics card in to temporary storage
+    /// in main memory, which can be a slow operation.
     pub fn close(self) {}
 }
 
 impl Drop for GlWindow {
     fn drop(&mut self) {
         let global_data = unsafe { &mut WINDOW_GLOBAL };
+        let gl_draw = unsafe { inner_gl_unsafe() };
+        let pos = gl_draw
+            .windows
+            .iter()
+            .position(|ptr| *ptr == self.ptr)
+            .expect("Window was closed but window pointer not in list.");
+        gl_draw.windows.swap_remove(pos);
 
         if global_data.num_windows == 1 {
-            let gl_draw = unsafe {
+            unsafe {
                 DRAW_INIT = false;
-                inner_gl_unsafe()
-            };
+            }
             gl_draw.orphan_resources();
         }
         unsafe {
@@ -571,11 +598,16 @@ impl<'a> DrawingSurface<'a> {
         self.gl.draw(&self.window);
         // we know that the transform is at the base level because `with_transform`
         // borrows the surface
+        let width = self.window.width.get();
+        let height = self.window.height.get();
         self.transform.set(self.coordinate_space.get_matrix(
-            self.window.width.get(),
-            self.window.height.get(),
+            width,
+            height,
             self.window.scale.get(),
         ));
+        unsafe {
+            gl::Viewport(0, 0, width, height);
+        }
     }
 
     pub fn background<C: color::Color>(&self, color: C) {
@@ -604,7 +636,7 @@ impl<'a> DrawingSurface<'a> {
         if let Some(inv) = self.transform.get().try_inverse() {
             let vec = inv * na::Vector4::new(x, y, z, 1.0);
             let nvec = vec / vec[3];
-            Some((vec[0], vec[1], vec[2]))
+            Some((nvec[0], nvec[1], nvec[2]))
         } else {
             None
         }
@@ -620,8 +652,6 @@ impl<'a> DrawingSurface<'a> {
         start: (f32, f32),
         end: (f32, f32),
     ) {
-        let gl_draw = inner_gl_static(self.gl);
-
         let shader = unsafe { free_draw::TEX_SHADER };
 
         let verts = [
@@ -689,8 +719,6 @@ impl<'a> DrawingSurface<'a> {
     }
 
     pub fn draw_triangle(&self, tri: [f32; 9], color: &color::Color) {
-        let gl_draw = inner_gl_static(self.gl);
-
         unsafe {
             let shader = free_draw::COLOR_SHADER;
             gl::UseProgram(shader);

@@ -43,6 +43,24 @@ pub fn byte_color_with_alpha(r: u8, g: u8, b: u8, a: u8) -> Color8Bit {
     }
 }
 
+pub fn gray(val: u8) -> Color8Bit {
+    Color8Bit {
+        color: [val, val, val, 255],
+    }
+}
+
+/// Generates a color from a hex code.
+pub fn from_hex_with_alpha(color: u32) -> Color8Bit {
+    Color8Bit {
+        color: [
+            ((color >> 16) & 0xFF) as u8,
+            ((color >> 8) & 0xFF) as u8,
+            (color & 0xFF) as u8,
+            ((color >> 24) & 0xFF) as u8,
+        ],
+    }
+}
+
 /// Generates a color from a hex code.
 pub fn from_hex(color: u32) -> Color8Bit {
     Color8Bit {
@@ -50,7 +68,7 @@ pub fn from_hex(color: u32) -> Color8Bit {
             ((color >> 16) & 0xFF) as u8,
             ((color >> 8) & 0xFF) as u8,
             (color & 0xFF) as u8,
-            ((color >> 24) & 0xFF) as u8,
+            255,
         ],
     }
 }

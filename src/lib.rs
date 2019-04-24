@@ -1,9 +1,5 @@
 #![recursion_limit = "256"]
 
-use std::cmp::{max, min};
-use std::fmt;
-use std::num::FpCategory;
-
 pub mod color;
 pub mod opengl;
 /// The swizzle module contains functions for safely reordering tuples and arrays
@@ -12,11 +8,6 @@ pub mod opengl;
 pub mod swizzle;
 
 use nalgebra as na;
-use opengl::shader;
-use shader::api::*;
-use shader::traits::{Constant, ExprMin, IntoArgs, Varying};
-use std::time::{Duration, Instant};
-use swizzle::SwizzleInPlace;
 
 /// A coordinate space.
 ///
@@ -70,11 +61,15 @@ impl CoordinateSpace {
                 [0.0, 0.0, 0.0],
             ),
             CoordinateSpace::PixelsTopLeft => (
-                [scale / width, -scale / height, 2.0 * scale / max],
+                [
+                    2.0 * scale / width,
+                    2.0 * -scale / height,
+                    2.0 * scale / max,
+                ],
                 [-1.0, 1.0, 0.0],
             ),
             CoordinateSpace::PixelsBottomLeft => (
-                [scale / width, scale / height, 2.0 * scale / max],
+                [2.0 * scale / width, 2.0 * scale / height, 2.0 * scale / max],
                 [-1.0, -1.0, 0.0],
             ),
             CoordinateSpace::WindowCenter => ([1.0, 1.0, 1.0], [0.0, 0.0, 0.0]),

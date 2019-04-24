@@ -74,8 +74,7 @@ macro_rules! swizzle_where {
 				// this is incredibly unsafe because it works for non-copy types
 				// to avoid possible double drop erros, the type validation must
 				// must work correctly. This could theoretically fail if a another
-				// crate were to implement a trait (for example `Not<A> for A`).
-				// these traits are marked as unsafe, so this isn't a safety violation
+				// crate were to implement the swizzle traits on their own types.
 				let out = unsafe {
 					($($mask::from_tuple(ptr::read(&self)),)*)
 				};
@@ -177,8 +176,17 @@ macro_rules! swizzle_traits {
 	)
 }
 
-swizzle_types!(R0, R1, R2, R3, R4, R5;S0, S1, S2, S3, S4, S5;0, 1, 2, 3, 4, 5;
-	Swizzle0, Swizzle1, Swizzle2, Swizzle3, Swizzle4, Swizzle5);
+#[cfg(not(feature = "longer_tuples"))]
+swizzle_types!(R0, R1, R2, R3, R4, R5, R6, R7;S0, S1, S2, S3, S4, S5, S6, S7;0, 1, 2, 3, 4, 5, 6, 7;
+	Swizzle1, Swizzle2, Swizzle3, Swizzle4, Swizzle5, Swizzle6, Swizzle7, Swizzle8);
+
+#[cfg(feature = "longer_tuples")]
+swizzle_types!(R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, R13, R14, R15;
+	S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15;
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15;
+	Swizzle1, Swizzle2, Swizzle3, Swizzle4, Swizzle5, Swizzle6, Swizzle7, Swizzle8,
+	Swizzle9, Swizzle10, Swizzle11, Swizzle12, Swizzle13, Swizzle14, Swizzle15, Swizzle16
+);
 
 pub trait AttachFront<T> {
     type AttachFront;
@@ -264,4 +272,4 @@ tuple_vec_operations!(
 );
 
 #[cfg(not(feature = "longer_tuples"))]
-tuple_vec_operations!(U1, U2, U3, U4, U5, U6, U7, U8,);
+tuple_vec_operations!(U1, U2, U3, U4, U5, U6, U7, U8, U9, U10, U11, U12, U13, U14, U15, U16,);
