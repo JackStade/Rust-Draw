@@ -308,389 +308,201 @@ pub struct ShaderArgList {
     args: Vec<DataType>,
 }
 
-/// This trait marks an object that contains some parameters for how the
-/// variables in a shader should be interpretted.
-///
-/// The role of this trait is complicated significantly by the fact that shaders have a number
-/// of built in variables. This means that there are a number of different interfaces that need
-/// to be described by this type:
-///
-/// * Uniforms: The uniforms that must be passed by the cpu, the 'Uniforms'
-/// minus any built in uniforms used.
-/// * PUniforms: The constant variables used by the shader program
-/// * In: `PIn` minus the set of built in inputs used
-/// * PIn: The inputs taken by the vertex shader.
-/// * Out: `POut` minus any built in outputs used by the fragment shader.
-/// * POut: The outputs of the fragment shader.
-/// * VOut: The outputs of the vertex shader, including those passed to the fragment
-/// shader and built in outputs.
-/// * FIn: The inputs of the fragment shader, including those passed by the vertex shader
-/// and built in inputs.
-pub unsafe trait ProgramPrototype<
-    Uniforms: ShaderArgs,
-    PUniforms: ShaderArgs,
-    In: ShaderArgs,
-    PIn: ShaderArgs,
-    Out: ShaderArgs,
-    POut: ShaderArgs,
-    VOut: ShaderArgs,
-    FIn: ShaderArgs,
->
-{
-    // these functions serve to map the program set including
-    // the input variables into the builtin vars and the program interface
-    fn uniforms(i: usize) -> VarType;
-
-    fn vert_inputs(i: usize) -> VarType;
-
-    fn vert_outputs(i: usize) -> VarType;
-
-    fn frag_inputs(i: usize) -> VarType;
-
-    fn frag_outputs(i: usize) -> VarType;
-}
-
-/// A basic prototype for shaders that don't need to use built in variables other
-/// than the vertex shader position output.
-pub struct SimplePrototype<
-    Uniforms: ShaderArgs,
-    In: ShaderArgsClass<InterfaceArgs>,
-    Pass: ShaderArgsClass<TransparentArgs>,
-    Out: ShaderArgsClass<InterfaceArgs>,
-> {
-    phantom: PhantomData<(Uniforms, In, Pass, Out)>,
-}
-
-pub fn simple_prototype<
-    U: ShaderArgs,
-    I: ShaderArgsClass<InterfaceArgs>,
-    P: ShaderArgsClass<TransparentArgs> + AttachFront<Float4>,
-    O: ShaderArgsClass<InterfaceArgs>,
->() -> SimplePrototype<U, I, P, O> {
-    SimplePrototype {
-        phantom: PhantomData,
-    }
-}
-
-use crate::swizzle::{AttachBack, AttachFront, RemoveBack, RemoveFront};
-
-unsafe impl<
-        U: ShaderArgs,
-        I: ShaderArgsClass<InterfaceArgs>,
-        P: ShaderArgsClass<TransparentArgs> + AttachFront<Float4>,
-        O: ShaderArgsClass<InterfaceArgs>,
-    > ProgramPrototype<U, U, I, I, O, O, P::AttachFront, P> for SimplePrototype<U, I, P, O>
-where
-    P::AttachFront: ShaderArgs,
-{
-    fn uniforms(i: usize) -> VarType {
-        VarType::Declare("u", i)
-    }
-
-    fn vert_inputs(i: usize) -> VarType {
-        VarType::Declare("i", i)
-    }
-
-    fn vert_outputs(i: usize) -> VarType {
-        if i == 0 {
-            VarType::Internal("gl_Position")
-        } else {
-            VarType::Declare("p", i - 1)
-        }
-    }
-
-    fn frag_inputs(i: usize) -> VarType {
-        VarType::Declare("p", i)
-    }
-
-    fn frag_outputs(i: usize) -> VarType {
-        VarType::Declare("o", i)
-    }
-}
-
-use builtin_vars::{
-    BuiltInFragInputs, BuiltInFragOutputs, BuiltInUniforms, BuiltInVars, BuiltInVertInputs,
-    BuiltInVertOutputs,
+pub use builtin_vars::{
+    BuiltInFragInputs, BuiltInFragOutputs, BuiltInVertInputs, BuiltInVertOutputs,
 };
 
-/// A full prototype is capable of referencing a full set of different
-/// built in variables, like depth and stencils values, vertex id, sample mask,
-/// etc.
-pub struct FullPrototype<
-    U: ShaderArgs,
-    I: ShaderArgsClass<InterfaceArgs>,
-    P: ShaderArgsClass<TransparentArgs>,
-    O: ShaderArgsClass<InterfaceArgs>,
-    UB: BuiltInVars<U>,
-    IB: BuiltInVars<I>,
-    VertPB: BuiltInVars<P>,
-    FragPB: BuiltInVars<P>,
-    OB: BuiltInVars<O>,
-> {
-    phantom: PhantomData<(U, I, P, O, UB, IB, VertPB, FragPB, OB)>,
-}
-
-unsafe impl<
-        U: ShaderArgs,
-        I: ShaderArgsClass<InterfaceArgs>,
-        P: ShaderArgsClass<TransparentArgs>,
-        O: ShaderArgsClass<InterfaceArgs>,
-        UB: BuiltInVars<U>,
-        IB: BuiltInVars<I>,
-        VertPB: BuiltInVars<P>,
-        FragPB: BuiltInVars<P>,
-        OB: BuiltInVars<O>,
-    > ProgramPrototype<U, UB::Tuple, I, IB::Tuple, O, OB::Tuple, VertPB::Tuple, FragPB::Tuple>
-    for FullPrototype<U, I, P, O, UB, IB, VertPB, FragPB, OB>
-{
-    fn uniforms(i: usize) -> VarType {
-        if i < UB::LEN {
-            VarType::Internal(UB::get_name(i))
-        } else {
-            VarType::Declare("u", i - UB::LEN)
-        }
-    }
-
-    fn vert_inputs(i: usize) -> VarType {
-        if i < IB::LEN {
-            VarType::Internal(IB::get_name(i))
-        } else {
-            VarType::Declare("i", i - IB::LEN)
-        }
-    }
-
-    fn vert_outputs(i: usize) -> VarType {
-        if i < VertPB::LEN {
-            VarType::Internal(VertPB::get_name(i))
-        } else {
-            VarType::Declare("p", i - VertPB::LEN)
-        }
-    }
-
-    fn frag_inputs(i: usize) -> VarType {
-        if i < FragPB::LEN {
-            VarType::Internal(FragPB::get_name(i))
-        } else {
-            VarType::Declare("p", i - FragPB::LEN)
-        }
-    }
-
-    fn frag_outputs(i: usize) -> VarType {
-        if i < OB::LEN {
-            VarType::Internal(OB::get_name(i))
-        } else {
-            VarType::Declare("o", i - OB::LEN)
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub struct ShaderParamSet<U: ShaderArgs, I: ShaderArgs, P: ShaderArgs, O: ShaderArgs> {
-    phantom: PhantomData<(U, I, P, O)>,
-}
-
-impl<U: ShaderArgs, I: ShaderArgs, P: ShaderArgs, O: ShaderArgs> ShaderParamSet<U, I, P, O> {
-    pub fn new() -> ShaderParamSet<U, I, P, O> {
-        ShaderParamSet {
-            phantom: PhantomData,
-        }
-    }
-}
-
-#[allow(unused)]
-pub fn full_prototype<
-    U: ShaderArgs,
-    I: ShaderArgsClass<InterfaceArgs>,
-    P: ShaderArgsClass<TransparentArgs>,
-    O: ShaderArgsClass<InterfaceArgs>,
-    UB: BuiltInVars<U>,
-    IB: BuiltInVars<I>,
-    VertPB: BuiltInVars<P>,
-    FragPB: BuiltInVars<P>,
-    OB: BuiltInVars<O>,
-    UF: Fn(BuiltInUniforms) -> UB,
-    IF: Fn(BuiltInVertInputs) -> IB,
-    VPF: Fn(BuiltInVertOutputs) -> VertPB,
-    FPF: Fn(BuiltInFragInputs) -> FragPB,
-    OF: Fn(BuiltInFragOutputs) -> OB,
->(
-    uniform_fn: UF,
-    input_fn: IF,
-    vertex_pass_fn: VPF,
-    fragment_pass_fn: FPF,
-    output_fn: OF,
-    set: ShaderParamSet<U, I, P, O>,
-) -> FullPrototype<U, I, P, O, UB, IB, VertPB, FragPB, OB> {
-    FullPrototype {
-        phantom: PhantomData,
-    }
-}
-
-/// This is a helper function that generates a prototype that uses the position
-/// vertex shader output and the depth fragment shader output.
-pub fn depth_prototype<
-    U: ShaderArgs,
-    I: ShaderArgsClass<InterfaceArgs>,
-    P: ShaderArgsClass<TransparentArgs>,
-    O: ShaderArgsClass<InterfaceArgs>,
->(
-    _set: ShaderParamSet<U, I, P, O>,
-) -> FullPrototype<
-    U,
-    I,
-    P,
-    O,
-    (),
-    (),
-    (builtin_vars::BuiltInVar<Float4, builtin_vars::Position>,),
-    (),
-    (builtin_vars::BuiltInVar<Float, builtin_vars::Depth>,),
->
-where
-    (): BuiltInVars<U> + BuiltInVars<I> + BuiltInVars<P>,
-    (builtin_vars::BuiltInVar<Float4, builtin_vars::Position>,): BuiltInVars<P>,
-    (builtin_vars::BuiltInVar<Float, builtin_vars::Depth>,): BuiltInVars<O>,
-{
-    FullPrototype {
-        phantom: PhantomData,
-    }
-}
+use builtin_vars::BuiltInOutputs;
 
 #[allow(unused)]
 pub mod builtin_vars {
-    use super::{ArgType, ShaderArgs};
-    use super::{Float, Float2, Float3, Float4, Int};
+    use super::traits::*;
+    use super::{Boolean, Float, Float2, Float3, Float4, Int};
+    use super::{ItemRef, VarBuilder, VarString};
     use crate::swizzle::{AttachBack, AttachFront, RemoveBack, RemoveFront};
     use std::marker::PhantomData;
 
-    pub struct BuiltInVar<T: ArgType, N: VarName> {
-        phantom: PhantomData<(T, N)>,
+    pub unsafe trait BuiltInOutput<T: ArgType> {
+        unsafe fn as_t(self) -> Option<T>;
     }
 
-    pub unsafe trait VarName {
-        const NAME: &'static str;
+    pub(super) trait BuiltInOutputs {
+        fn get_strings(self, builder: &mut VarBuilder) -> String;
     }
 
-    struct Hidden;
-
-    pub struct VertexID {
-        hidden: Hidden,
-    }
-
-    pub struct InstanceID {
-        hidden: Hidden,
-    }
-
-    pub struct Position {
-        hidden: Hidden,
-    }
-
-    pub struct PointSize {
-        hidden: Hidden,
-    }
-
-    pub struct Depth {
-        hidden: Hidden,
-    }
-
-    pub struct FragCoord {
-        hidden: Hidden,
-    }
-
-    pub struct PointCoord {
-        hidden: Hidden,
-    }
-
-    unsafe impl VarName for VertexID {
-        const NAME: &'static str = "gl_VertexID";
-    }
-
-    unsafe impl VarName for InstanceID {
-        const NAME: &'static str = "gl_InstanceID";
-    }
-
-    unsafe impl VarName for Position {
-        const NAME: &'static str = "gl_Position";
-    }
-
-    unsafe impl VarName for PointSize {
-        const NAME: &'static str = "gl_PointSize";
-    }
-
-    unsafe impl VarName for Depth {
-        const NAME: &'static str = "gl_FragDepth";
-    }
-
-    unsafe impl VarName for FragCoord {
-        const NAME: &'static str = "gl_FragCoord";
-    }
-
-    unsafe impl VarName for PointCoord {
-        const NAME: &'static str = "gl_PointCoord";
-    }
-
-    pub struct BuiltInUniforms {}
-
-    pub struct BuiltInVertInputs {
-        pub vertex_id: BuiltInVar<Int, VertexID>,
-        pub instance_id: BuiltInVar<Int, InstanceID>,
-    }
-
-    pub struct BuiltInVertOutputs {
-        pub position: BuiltInVar<Float4, Position>,
-        pub point_size: BuiltInVar<Float4, PointSize>,
-    }
-
-    pub struct BuiltInFragInputs {
-        pub frag_coord: BuiltInVar<Float4, FragCoord>,
-        pub point_coord: BuiltInVar<Float2, PointCoord>,
-    }
-
-    pub struct BuiltInFragOutputs {
-        pub depth: BuiltInVar<Float, Depth>,
-    }
-
-    pub unsafe trait BuiltInVars<A> {
-        type Tuple: ShaderArgs;
-
-        const LEN: usize;
-
-        fn get_name(i: usize) -> &'static str;
-    }
-
-    pub struct RecursiveTuple<T, U> {
-        _t: T,
-        _u: U,
-    }
-
-    unsafe impl<T, A, F: ArgType, B: ArgType, FN: VarName, BN: VarName> BuiltInVars<A> for T
-    where
-        T: RemoveFront<Front = BuiltInVar<F, FN>>,
-        T: RemoveBack<Back = BuiltInVar<B, BN>>,
-        A: AttachFront<B>,
-        <T as RemoveFront>::Remaining: BuiltInVars<A>,
-        <T as RemoveBack>::Remaining: BuiltInVars<A::AttachFront>,
-        <<T as RemoveBack>::Remaining as BuiltInVars<A::AttachFront>>::Tuple: ShaderArgs,
-    {
-        type Tuple = <<T as RemoveBack>::Remaining as BuiltInVars<A::AttachFront>>::Tuple;
-
-        const LEN: usize = <T as RemoveBack>::Remaining::LEN + 1;
-
-        fn get_name(i: usize) -> &'static str {
-            if (i == 0) {
-                return FN::NAME;
-            }
-            <T as RemoveFront>::Remaining::get_name(i - 1)
+    unsafe impl<T: ArgType> BuiltInOutput<T> for () {
+        unsafe fn as_t(self) -> Option<T> {
+            None
         }
     }
 
-    unsafe impl<A: ShaderArgs> BuiltInVars<A> for () {
-        type Tuple = A;
+    unsafe impl<T: ArgType, S: IntoArg<Arg = T>> BuiltInOutput<T> for S {
+        unsafe fn as_t(self) -> Option<T> {
+            Some(self.into_arg())
+        }
+    }
 
-        const LEN: usize = 0;
+    fn create_in<S: ExprType<T>, T: ArgType>(s: &'static str) -> S {
+        unsafe { S::from_t(T::create(VarString::new(s), ItemRef::Static)) }
+    }
 
-        fn get_name(i: usize) -> &'static str {
-            panic!("Name {} is out of bounds for this set of built in vars.", i);
+    pub struct BuiltInVertInputs {
+        pub vertex_id: Varying<Int>,
+        pub instance_id: Varying<Int>,
+        pub depth_near: Uniform<Float>,
+        pub depth_far: Uniform<Float>,
+        pub depth_diff: Uniform<Float>,
+    }
+
+    impl BuiltInVertInputs {
+        pub(super) fn new() -> BuiltInVertInputs {
+            BuiltInVertInputs {
+                vertex_id: create_in("gl_VertexID"),
+                instance_id: create_in("gl_InstanceID"),
+                depth_near: create_in("gl_DepthRange.near"),
+                depth_far: create_in("gl_DepthRange.far"),
+                depth_diff: create_in("gl_DepthRange.diff"),
+            }
+        }
+    }
+
+    pub struct BuiltInVertOutputs {
+        position: Option<Float4>,
+        point_size: Option<Float>,
+        clip_distance: (),
+    }
+
+    impl BuiltInOutputs for BuiltInVertOutputs {
+        fn get_strings(self, builder: &mut VarBuilder) -> String {
+            let mut string = String::new();
+            if let Some(p) = self.position {
+                string = format!(
+                    "   gl_Position = {};\n",
+                    builder.format_var(&p.as_shader_data())
+                );
+            }
+            if let Some(s) = self.point_size {
+                string = format!(
+                    "{}   gl_PointSize = {};\n",
+                    string,
+                    builder.format_var(&s.as_shader_data())
+                );
+            }
+            string
+        }
+    }
+
+    impl BuiltInVertOutputs {
+        pub fn empty() -> BuiltInVertOutputs {
+            unsafe {
+                BuiltInVertOutputs {
+                    position: None,
+                    point_size: None,
+                    clip_distance: (),
+                }
+            }
+        }
+
+        pub fn position<T: IntoArg<Arg = Float4>>(position: T) -> BuiltInVertOutputs {
+            unsafe {
+                BuiltInVertOutputs {
+                    position: Some(position.into_arg()),
+                    point_size: None,
+                    clip_distance: (),
+                }
+            }
+        }
+
+        pub fn create<T: BuiltInOutput<Float4>, S: BuiltInOutput<Float>>(
+            position: T,
+            point_size: S,
+        ) -> BuiltInVertOutputs {
+            unsafe {
+                BuiltInVertOutputs {
+                    position: position.as_t(),
+                    point_size: point_size.as_t(),
+                    clip_distance: (),
+                }
+            }
+        }
+    }
+
+    pub struct BuiltInFragInputs {
+        pub frag_coord: Varying<Float4>,
+        pub point_coord: Varying<Float2>,
+        pub primitive_id: Varying<Int>,
+        pub clip_distance: (),
+        pub depth_near: Uniform<Float>,
+        pub depth_far: Uniform<Float>,
+        pub depth_diff: Uniform<Float>,
+    }
+
+    impl BuiltInFragInputs {
+        pub(super) fn new() -> BuiltInFragInputs {
+            BuiltInFragInputs {
+                frag_coord: create_in("gl_FragCoord"),
+                point_coord: create_in("gl_PointCoord"),
+                primitive_id: create_in("gl_PrimitiveID"),
+                clip_distance: (),
+                depth_near: create_in("gl_DepthRange.near"),
+                depth_far: create_in("gl_DepthRange.far"),
+                depth_diff: create_in("gl_DepthRange.diff"),
+            }
+        }
+    }
+
+    pub struct BuiltInFragOutputs {
+        depth: Option<Float>,
+        discard: Option<Boolean>,
+    }
+
+    impl BuiltInOutputs for BuiltInFragOutputs {
+        fn get_strings(self, builder: &mut VarBuilder) -> String {
+            let mut string = String::new();
+            if let Some(disc) = self.discard {
+                string = format!(
+                    "   if ({}) discard;\n",
+                    builder.format_var(&disc.as_shader_data())
+                );
+            }
+            if let Some(dp) = self.depth {
+                string = format!(
+                    "{}   gl_FragDepth = {};\n",
+                    string,
+                    builder.format_var(&dp.as_shader_data())
+                );
+            }
+            string
+        }
+    }
+
+    impl BuiltInFragOutputs {
+        pub fn empty() -> BuiltInFragOutputs {
+            BuiltInFragOutputs {
+                depth: None,
+                discard: None,
+            }
+        }
+
+        pub fn depth<T: IntoArg<Arg = Float>>(depth: T) -> BuiltInFragOutputs {
+            unsafe {
+                BuiltInFragOutputs {
+                    depth: Some(depth.into_arg()),
+                    discard: None,
+                }
+            }
+        }
+
+        pub fn create<T: BuiltInOutput<Float>, S: BuiltInOutput<Boolean>>(
+            depth: T,
+            discard: S,
+        ) -> BuiltInFragOutputs {
+            unsafe {
+                BuiltInFragOutputs {
+                    depth: depth.as_t(),
+                    discard: discard.as_t(),
+                }
+            }
         }
     }
 }
@@ -719,6 +531,15 @@ pub struct ShaderProgram<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> 
     program_id: u32,
     // need to make sure the type is not send or sync
     phantom: PhantomData<(In, Uniforms, Out, std::rc::Rc<()>)>,
+}
+
+impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> Drop
+    for ShaderProgram<In, Uniforms, Out>
+{
+    fn drop(&mut self) {
+        let gl_draw = unsafe { super::inner_gl_unsafe() };
+        gl_draw.remove_resource(self.program_id);
+    }
 }
 
 #[cfg(not(feature = "opengl41"))]
@@ -757,6 +578,7 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
     for ShaderProgram<In, Uniforms, Out>
 {
     unsafe fn adopt(ptr: *mut (), id: u32) -> Option<*mut ()> {
+        println!("adopt");
         let gl_draw = super::inner_gl_unsafe();
         let [data_len, format, drop_len] = ptr::read(ptr as *const [u32; 3]);
         let ptr = ptr as *mut u32;
@@ -769,17 +591,20 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
     }
 
     unsafe fn drop_while_orphaned(ptr: *mut (), _id: u32) {
+        println!("drop");
         let [_, _, drop_len] = ptr::read(ptr as *const [u32; 3]);
         let _drop_vec = Vec::from_raw_parts(ptr, drop_len as usize, drop_len as usize);
         // drop the data
     }
 
     unsafe fn cleanup(_ptr: *mut (), _id: u32) {
+        println!("cleanup");
         // nothing needs to be done here, since a shader does not
         // store any data in the pointer when not in an orphan state
     }
 
     unsafe fn orphan(id: u32, _ptr: *mut ()) -> *mut () {
+        println!("orphan");
         let gl_draw = super::inner_gl_unsafe();
         let program = gl_draw.resource_list[id as usize];
         let mut len = 0;
@@ -788,9 +613,10 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
         // adding 3 to len rounds up if the binary length is not a multiple
         // of 4
         let mut buffer = Vec::<u32>::with_capacity(3 + (len as usize + 3) >> 2);
+        let cap = buffer.capacity();
         let mut data_len = 0;
         let ptr = buffer.as_mut_ptr();
-        buffer.set_len(3);
+        std::mem::forget(buffer);
         gl::GetProgramBinary(
             program,
             len,
@@ -798,10 +624,9 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
             &mut format,
             ptr.offset(3) as *mut _,
         );
-        buffer[0] = data_len as u32;
-        buffer[1] = format;
-        buffer[2] = buffer.capacity() as u32;
-        std::mem::forget(buffer);
+        ptr.write(data_len as u32);
+        ptr.offset(1).write(format);
+        ptr.offset(2).write(cap as u32);
         ptr as *mut ()
     }
 }
@@ -848,53 +673,59 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> ShaderProgram<In, Un
 /// that can be difficult to use correctly.
 pub fn create_program<
     Uniforms: ShaderArgs,
-    PUniforms: ShaderArgs,
-    In: ShaderArgs,
-    PIn: ShaderArgs,
-    Out: ShaderArgs,
-    POut: ShaderArgs,
-    VOut: ShaderArgs,
-    FIn: ShaderArgs,
-    VGenOut: IntoArgs<Args = VOut>,
-    FGenOut: IntoArgs<Args = POut>,
-    Vert: Fn(PIn::AsVarying, PUniforms::AsUniform) -> VGenOut + Sync,
-    Frag: Fn(FIn::AsVarying, PUniforms::AsUniform) -> FGenOut + Sync,
-    Proto: ProgramPrototype<Uniforms, PUniforms, In, PIn, Out, POut, VOut, FIn>,
+    In: ShaderArgs + ShaderArgsClass<TransparentArgs>,
+    Pass: IntoArgs,
+    Out: IntoArgs,
+    VertFN: FnOnce(In::AsVarying, Uniforms::AsUniform, BuiltInVertInputs) -> (Pass, BuiltInVertOutputs),
+    FragFN: FnOnce(
+        <Pass::Args as ShaderArgs>::AsVarying,
+        Uniforms::AsUniform,
+        BuiltInFragInputs,
+    ) -> (Out, BuiltInFragOutputs),
 >(
     _window: &super::GlWindow,
-    _prototype: &Proto,
-    vertex_shader_fn: Vert,
-    fragment_shader_fn: Frag,
-) -> ShaderProgram<In, Uniforms, Out> {
-    let uniform_names = Proto::uniforms;
-    let in_names = Proto::vert_inputs;
-    let v_pass = Proto::vert_outputs;
-    let f_pass = Proto::frag_inputs;
-    let output_names = Proto::frag_outputs;
-    let v_shader_string = CString::new(create_shader_string::<PIn, PUniforms, VGenOut, Vert>(
+    vertex_shader_fn: VertFN,
+    fragment_shader_fn: FragFN,
+) -> ShaderProgram<In, Uniforms, Out::Args>
+where
+    Out::Args: ShaderArgs + ShaderArgsClass<TransparentArgs> + ShaderArgsClass<OutputArgs>,
+    Pass::Args: ShaderArgsClass<TransparentArgs>,
+{
+    let v_string = CString::new(create_shader_string::<
+        In,
+        Uniforms,
+        Pass,
+        BuiltInVertInputs,
+        BuiltInVertOutputs,
+        VertFN,
+    >(
         vertex_shader_fn,
-        in_names,
-        uniform_names,
-        v_pass,
-        // vertex outputs don't have layout qualifiers, but the inputs do
+        BuiltInVertInputs::new(),
+        "in",
+        "u",
+        "pass",
         true,
         false,
     ))
     .unwrap();
-    let f_shader_string = CString::new(create_shader_string::<FIn, PUniforms, FGenOut, Frag>(
+    let f_string = CString::new(create_shader_string::<
+        Pass::Args,
+        Uniforms,
+        Out,
+        BuiltInFragInputs,
+        BuiltInFragOutputs,
+        FragFN,
+    >(
         fragment_shader_fn,
-        f_pass,
-        uniform_names,
-        output_names,
-        // fragment inputs don't have layout qualifiers, but the outputs do
+        BuiltInFragInputs::new(),
+        "pass",
+        "u",
+        "out",
         false,
         true,
     ))
     .unwrap();
-    let program = get_program(
-        v_shader_string.as_bytes_with_nul(),
-        f_shader_string.as_bytes_with_nul(),
-    );
+    let program = get_program(v_string.as_bytes_with_nul(), f_string.as_bytes_with_nul());
     if cfg!(feature = "opengl41") {
         unsafe {
             gl::ProgramParameteri(
@@ -904,21 +735,16 @@ pub fn create_program<
             );
         }
     }
-
     let mut uniform_locations = vec![0; Uniforms::NARGS];
-    for i in 0..PUniforms::NARGS {
-        if let VarType::Declare(_, n) = uniform_names(i) {
-            unsafe {
-                uniform_locations[n] = gl::GetUniformLocation(
-                    program,
-                    CString::new(format!("{}", uniform_names(i)))
-                        .unwrap()
-                        .as_ptr() as *const _,
-                );
-            }
+    for i in 0..Uniforms::NARGS {
+        unsafe {
+            uniform_locations[i] = gl::GetUniformLocation(
+                program,
+                CString::new(format!("u{}", i)).unwrap().as_ptr() as *const _,
+            );
         }
     }
-    ShaderProgram::new(program, uniform_locations, v_shader_string, f_shader_string)
+    ShaderProgram::new(program, uniform_locations, v_string, f_string)
 }
 
 #[cfg(not(feature = "opengl41"))]
@@ -943,82 +769,88 @@ const VERSION: &str = "#version 450 core";
 const VERSION: &str = "#version 460 core";
 
 fn create_shader_string<
-    In: ShaderArgs,
+    In: ShaderArgs + ShaderArgsClass<TransparentArgs>,
     Uniforms: ShaderArgs,
     Out: IntoArgs,
-    Shader: Fn(In::AsVarying, Uniforms::AsUniform) -> Out,
+    T,
+    S: builtin_vars::BuiltInOutputs,
+    Shader: FnOnce(In::AsVarying, Uniforms::AsUniform, T) -> (Out, S),
 >(
     generator: Shader,
-    input_names: fn(usize) -> VarType,
-    uniform_names: fn(usize) -> VarType,
-    output_names: fn(usize) -> VarType,
+    gen_in: T,
+
+    in_str: &'static str,
+    uniform_str: &'static str,
+    out_str: &'static str,
+
     input_qualifiers: bool,
     output_qualifiers: bool,
-) -> String {
+) -> String
+where
+    Out::Args: ShaderArgsClass<TransparentArgs>,
+{
     let mut shader = format!("{}\n", VERSION);
     let in_args = In::map_args().args;
+    let mut position = 0;
     for i in 0..In::NARGS {
-        if let VarType::Declare(_, n) = input_names(i) {
-            if input_qualifiers {
-                shader = format!(
-                    "{}layout(location = {}) in {} {};\n",
-                    shader,
-                    n,
-                    in_args[i].gl_type(),
-                    input_names(i)
-                );
-            } else {
-                shader = format!(
-                    "{}in {} {};\n",
-                    shader,
-                    in_args[i].gl_type(),
-                    input_names(i)
-                );
-            }
+        if input_qualifiers {
+            shader = format!(
+                "{}layout(location = {}) in {} {}{};\n",
+                shader,
+                position,
+                in_args[i].gl_type(),
+                in_str,
+                i,
+            );
+            position += In::get_param(i).num_input_locations;
+        } else {
+            shader = format!("{}in {} {}{};\n", shader, in_args[i].gl_type(), in_str, i,);
         }
     }
     shader = format!("{}\n", shader);
     let uniform_args = Uniforms::map_args().args;
     for i in 0..Uniforms::NARGS {
-        if let VarType::Declare(_, _) = uniform_names(i) {
-            shader = format!(
-                "{}uniform {} {};\n",
-                shader,
-                uniform_args[i].gl_type(),
-                uniform_names(i)
-            );
-        }
+        shader = format!(
+            "{}uniform {} {}{};\n",
+            shader,
+            uniform_args[i].gl_type(),
+            uniform_str,
+            i
+        );
     }
     shader = format!("{}\n", shader);
     let out_args = Out::Args::map_args().args;
+    let mut position = 0;
     for i in 0..Out::Args::NARGS {
-        if let VarType::Declare(_, n) = output_names(i) {
-            if output_qualifiers {
-                shader = format!(
-                    "{}layout(location = {}) out {} {};\n",
-                    shader,
-                    n,
-                    out_args[i].gl_type(),
-                    output_names(i)
-                );
-            } else {
-                shader = format!(
-                    "{}out {} {};\n",
-                    shader,
-                    out_args[i].gl_type(),
-                    output_names(i)
-                );
-            }
+        if output_qualifiers {
+            shader = format!(
+                "{}layout(location = {}) out {} {}{};\n",
+                shader,
+                position,
+                out_args[i].gl_type(),
+                out_str,
+                i,
+            );
+            position += Out::Args::get_param(i).num_locations;
+        } else {
+            shader = format!(
+                "{}out {} {}{};\n",
+                shader,
+                out_args[i].gl_type(),
+                out_str,
+                i,
+            );
         }
     }
-    // the create function are marked as unsafe because it is neccesary to
+    // the create functions are marked as unsafe because it is neccesary to
     // ensure that the names created are defined in the shader.
-    let in_type = unsafe { In::create(input_names) };
-    let uniform_type = unsafe { Uniforms::create(uniform_names) };
-    let out = unsafe {
+    let in_type = unsafe { In::create(in_str) };
+    let uniform_type = unsafe { Uniforms::create(out_str) };
+    let (out, bout) = unsafe {
         let input = in_type.as_varying();
         let output = uniform_type.as_uniform();
-        generator(input, output).into_args().map_data_args().args
+        let (out, builtin) = generator(input, output, gen_in);
+        (out.into_args().map_data_args().args, builtin)
     };
     shader = format!("{}\n\nvoid main() {{\n", shader);
     let mut builder = VarBuilder::new("var");
@@ -1026,9 +858,11 @@ fn create_shader_string<
     for i in 0..out.len() {
         out_strings.push(builder.format_var(&out[i].1));
     }
+    let bstring = bout.get_strings(&mut builder);
     shader = builder.add_strings(shader);
+    shader = format!("{}{}\n", shader, bstring);
     for i in 0..out.len() {
-        shader = format!("{}   {} = {};\n", shader, output_names(i), out_strings[i]);
+        shader = format!("{}   {}{} = {};\n", shader, out_str, i, out_strings[i]);
     }
     shader = format!("{}}}\n", shader);
     println!("{}\n", shader);
@@ -1227,6 +1061,9 @@ pub mod api {
     pub use super::{Bool2Arg, Bool3Arg, Bool4Arg, BoolArg};
     pub use super::{Float2Arg, Float3Arg, Float4Arg, FloatArg};
     pub use super::{Int2Arg, Int3Arg, Int4Arg, IntArg};
+
+    pub type FragOutputs = super::BuiltInFragOutputs;
+    pub type VertOutputs = super::BuiltInVertOutputs;
 }
 
 #[allow(unused, unused_parens)]
@@ -1604,26 +1441,35 @@ pub mod traits {
             Self: ExprCombine<SZ::Out>;
     }
 
-    pub unsafe trait ArgClass {}
+    pub unsafe trait ArgClass: Copy {}
 
-    pub unsafe trait ArgParameter<T: ArgClass> {}
+    pub unsafe trait ArgParameter<T: ArgClass> {
+        const PARAM: T;
+    }
 
     unsafe impl ArgClass for () {}
 
-    unsafe impl<T: ArgType> ArgParameter<()> for T {}
+    unsafe impl<T: ArgType> ArgParameter<()> for T {
+        const PARAM: () = ();
+    }
 
     /// Most arg types, but not opaque types like samplers.
-    pub struct TransparentArgs;
+    #[derive(Clone, Copy)]
+    pub struct TransparentArgs {
+        // the number of locations can be different depening on where the type is used
+        pub num_locations: usize,
+        pub num_input_locations: usize,
+    }
 
     unsafe impl ArgClass for TransparentArgs {}
 
-    /// The types of args that can be used as vertex shader inputs or
-    /// fragment shader outputs. This includes all scalar and vector types, but
-    /// not matrix types. All types that implement `ArgParameter<InterfaceArgs>`
-    /// also implement `ArgParameter<TransparentArgs>`.
-    pub struct InterfaceArgs;
+    /// The types of args that can be used as fragment shader outputs. This includes all scalar
+    /// and vector types except booleans, but not matrix types. All types that implement
+    /// `ArgParameter<OutputArgs>` also implement `ArgParameter<TransparentArgs>`.
+    #[derive(Clone, Copy)]
+    pub struct OutputArgs;
 
-    unsafe impl ArgClass for InterfaceArgs {}
+    unsafe impl ArgClass for OutputArgs {}
 
     /// ShaderArgs is a trait that is implemented for types of
     /// possible opengl argument sets
@@ -1631,7 +1477,7 @@ pub mod traits {
         const NARGS: usize;
 
         /// Do not call this function.
-        unsafe fn create(names: fn(usize) -> VarType) -> Self;
+        unsafe fn create(prefix: &'static str) -> Self;
 
         type AsUniform;
 
@@ -1652,7 +1498,9 @@ pub mod traits {
 
     /// Sometimes it is neccessary to restrict a type to only certain types
     /// of arguments.
-    pub unsafe trait ShaderArgsClass<T>: ShaderArgs {}
+    pub unsafe trait ShaderArgsClass<T>: ShaderArgs {
+        fn get_param(i: usize) -> T;
+    }
 
     macro_rules! impl_shader_args {
 		// a macro could be implemented that counts the number of arguments
@@ -1662,10 +1510,10 @@ pub mod traits {
 			unsafe impl<$($name: ArgType),*> ShaderArgs for ($($name,)*) {
 				const NARGS: usize = $num;
 
-				unsafe fn create(names: fn(usize) -> VarType) -> Self {
+				unsafe fn create(prefix: &'static str) -> Self {
 					let n = 0;
 					$(
-						let $name = $name::create(VarString::new(names(n)), ItemRef::Static);
+						let $name = $name::create(VarString::new(format!("{}{}", prefix, n)), ItemRef::Static);
 						let n = n + 1;
 					)*
 					($($name,)*)
@@ -1708,7 +1556,11 @@ pub mod traits {
                 }
             }
 
-            unsafe impl<T: ArgClass, $($name: ArgType + ArgParameter<T>),*> ShaderArgsClass<T> for ($($name,)*) {}
+            unsafe impl<T: ArgClass, $($name: ArgType + ArgParameter<T>),*> ShaderArgsClass<T> for ($($name,)*) {
+                fn get_param(i: usize) -> T {
+                    [$($name::PARAM),*][i]
+                }
+            }
 		)
 	}
 
@@ -1909,9 +1761,9 @@ macro_rules! vec_type {
         	}
         }
 
-        unsafe impl ArgParameter<TransparentArgs> for $vec_type {}
-
-        unsafe impl ArgParameter<InterfaceArgs> for $vec_type {}
+        unsafe impl ArgParameter<TransparentArgs> for $vec_type {
+            const PARAM: TransparentArgs = TransparentArgs { num_input_locations: 1, num_locations: 1 };
+        }
 
         subs!($trait, $vec, $vec_type ;  ; $($sub,)*);
     )
@@ -2097,6 +1949,16 @@ macro_rules! create_vec {
     }
 }
 
+macro_rules! vec_output {
+    ($($vec_type:ident),*) => (
+        $(
+            unsafe impl ArgParameter<OutputArgs> for $vec_type {
+                const PARAM: OutputArgs = OutputArgs {};
+            }
+        )*
+    )
+}
+
 create_vec!(f32, "", Float4, Float3, Float2, Float;
     float4, float3, float2, float;
     Float4Arg, Float3Arg, Float2Arg, FloatArg);
@@ -2108,6 +1970,8 @@ create_vec!(i32, "", Int4, Int3, Int2, Int;
 create_vec!(u32, "", UInt4, UInt3, UInt2, UInt;
     uint4, uint3, uint2, uint;
     UInt4Arg, UInt3Arg, UInt2Arg, UIntArg);
+
+vec_output!(Float4, Float3, Float2, Float, Int4, Int3, Int2, Int, UInt4, UInt3, UInt2, UInt);
 
 create_vec!(bool, "", Boolean4, Boolean3, Boolean2, Boolean;
     boolean4, boolean3, boolean2, boolean;
@@ -2176,8 +2040,6 @@ macro_rules! impl_matrix {
                 self.data.data.into_inner()
             }
         }
-
-        unsafe impl ArgParameter<TransparentArgs> for $matrix_type {}
     )
 }
 
@@ -2240,6 +2102,16 @@ macro_rules! mat_ops {
 
 }
 
+macro_rules! matrix_param {
+    (;$cols:expr) => ();
+    ($mat:ident, $($m:ident,)*; $cols:expr) => (
+        unsafe impl ArgParameter<TransparentArgs> for $mat {
+            const PARAM: TransparentArgs = TransparentArgs { num_locations: 1, num_input_locations: $cols };
+        }
+        matrix_param!($($m,)*;$cols - 1);
+    )
+}
+
 macro_rules! create_matrix {
     ($t:ident, $($vec:ident, $($mat:ident, $mat_fn:ident, $trait:ident,)*;)*) => (
         matrix_subs!($($vec, $($mat,)*;)*);
@@ -2247,6 +2119,7 @@ macro_rules! create_matrix {
         mat_ops!(!$($vec,)*;$($vec,)*;$($($mat,)*;)*);
 
         $(
+            matrix_param!($($mat,)*;4);
             $(
                 arg_op!(Mul, mul, $t, $mat, $mat);
                 arg_op!(Mul, mul, $mat, $t, $mat);

@@ -123,7 +123,7 @@ pub unsafe trait InterfaceBinding {
     unsafe fn bind_all_to_vao<F: FnMut() -> u32>(self, locations: F);
 }
 
-unsafe impl<T: ArgType + ArgParameter<InterfaceArgs>, B: BindBuffer<T>> InterfaceBinding
+unsafe impl<T: ArgType + ArgParameter<TransparentArgs>, B: BindBuffer<T>> InterfaceBinding
     for BufferBinding<T, B>
 where
     (T,): ShaderArgs,
@@ -135,17 +135,16 @@ where
     }
 }
 
-unsafe impl InterfaceBinding for ()
-{
+unsafe impl InterfaceBinding for () {
     type Bind = ();
 
     unsafe fn bind_all_to_vao<F: FnMut() -> u32>(self, mut locations: F) {
-    	// don't do anything
+        // don't do anything
     }
 }
 
 unsafe impl<
-        S: ArgType + ArgParameter<InterfaceArgs>,
+        S: ArgType + ArgParameter<TransparentArgs>,
         B: BindBuffer<S>,
         R: InterfaceBinding,
         T: RemoveFront<Front = BufferBinding<S, B>, Remaining = R>,
@@ -164,12 +163,12 @@ where
 }
 
 #[derive(Clone, Copy)]
-pub struct BufferBinding<T: ArgType + ArgParameter<InterfaceArgs>, B: BindBuffer<T>> {
+pub struct BufferBinding<T: ArgType + ArgParameter<TransparentArgs>, B: BindBuffer<T>> {
     binding: B,
     phantom: PhantomData<T>,
 }
 
-pub unsafe trait BindBuffer<T: ArgType + ArgParameter<InterfaceArgs>> {
+pub unsafe trait BindBuffer<T: ArgType + ArgParameter<TransparentArgs>> {
     /// Binds the buffer (or in the case of matrix types, buffers) to the
     /// currently active VAO, setting the vertex attribute pointer.
 
@@ -179,16 +178,16 @@ pub unsafe trait BindBuffer<T: ArgType + ArgParameter<InterfaceArgs>> {
     unsafe fn bind_to_vao(&self, location: u32);
 }
 
-fn wrap<T: ArgType + ArgParameter<InterfaceArgs>, B: BindBuffer<T>>(
+fn wrap<T: ArgType + ArgParameter<TransparentArgs>, B: BindBuffer<T>>(
     binding: B,
 ) -> BufferBinding<T, B> {
-    BufferBinding { 
-    	binding: binding,
-    	phantom: PhantomData,
+    BufferBinding {
+        binding: binding,
+        phantom: PhantomData,
     }
 }
 
-pub struct VecBufferBinding<'a, T: ArgType + ArgParameter<InterfaceArgs>> {
+pub struct VecBufferBinding<'a, T: ArgType + ArgParameter<TransparentArgs>> {
     buffer: GLuint,
     // 0 - normed float
     // 1 - unnormed float
@@ -205,15 +204,15 @@ pub struct VecBufferBinding<'a, T: ArgType + ArgParameter<InterfaceArgs>> {
     phantom: PhantomData<&'a T>,
 }
 
-impl<'a, T: ArgType + ArgParameter<InterfaceArgs>> Copy for VecBufferBinding<'a, T> {}
+impl<'a, T: ArgType + ArgParameter<TransparentArgs>> Copy for VecBufferBinding<'a, T> {}
 
-impl<'a, T: ArgType + ArgParameter<InterfaceArgs>> Clone for VecBufferBinding<'a, T> {
+impl<'a, T: ArgType + ArgParameter<TransparentArgs>> Clone for VecBufferBinding<'a, T> {
     fn clone(&self) -> VecBufferBinding<'a, T> {
         *self
     }
 }
 
-unsafe impl<'a, T: ArgType + ArgParameter<InterfaceArgs>> BindBuffer<T>
+unsafe impl<'a, T: ArgType + ArgParameter<TransparentArgs>> BindBuffer<T>
     for VecBufferBinding<'a, T>
 {
     unsafe fn bind_to_vao(&self, location: u32) {
@@ -244,7 +243,7 @@ unsafe impl<'a, T: ArgType + ArgParameter<InterfaceArgs>> BindBuffer<T>
     }
 }
 
-impl<'a, T: ArgType + ArgParameter<InterfaceArgs>> VecBufferBinding<'a, T> {
+impl<'a, T: ArgType + ArgParameter<TransparentArgs>> VecBufferBinding<'a, T> {
     fn new<S: GlDataType>(
         buffer: GLuint,
         int_norm: u8,
@@ -300,7 +299,7 @@ impl<T: IntType> VertexBuffer<T> {
         stride: Option<u32>,
     ) -> BufferBinding<C::S, VecBufferBinding<'a, C::S>>
     where
-        C::S: ArgType + ArgParameter<InterfaceArgs>,
+        C::S: ArgType + ArgParameter<TransparentArgs>,
     {
         wrap(VecBufferBinding::new::<T>(
             unsafe { inner_gl_unsafe_static().resource_list[self.buffer.buffer_id as usize] },
@@ -319,7 +318,7 @@ impl<T: IntType> VertexBuffer<T> {
         stride: Option<u32>,
     ) -> BufferBinding<C::S, VecBufferBinding<'a, C::S>>
     where
-        C::S: ArgType + ArgParameter<InterfaceArgs>,
+        C::S: ArgType + ArgParameter<TransparentArgs>,
     {
         wrap(VecBufferBinding::new::<T>(
             unsafe { inner_gl_unsafe_static().resource_list[self.buffer.buffer_id as usize] },
@@ -338,7 +337,7 @@ impl<T: IntType> VertexBuffer<T> {
         stride: Option<u32>,
     ) -> BufferBinding<C::S, VecBufferBinding<'a, C::S>>
     where
-        C::S: ArgType + ArgParameter<InterfaceArgs>,
+        C::S: ArgType + ArgParameter<TransparentArgs>,
     {
         wrap(VecBufferBinding::new::<T>(
             unsafe { inner_gl_unsafe_static().resource_list[self.buffer.buffer_id as usize] },
@@ -359,7 +358,7 @@ impl VertexBuffer<f32> {
         stride: Option<u32>,
     ) -> BufferBinding<C::S, VecBufferBinding<'a, C::S>>
     where
-        C::S: ArgType + ArgParameter<InterfaceArgs>,
+        C::S: ArgType + ArgParameter<TransparentArgs>,
     {
         wrap(VecBufferBinding::new::<f32>(
             unsafe { inner_gl_unsafe_static().resource_list[self.buffer.buffer_id as usize] },

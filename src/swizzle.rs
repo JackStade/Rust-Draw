@@ -25,6 +25,14 @@ pub trait Swizzle<Mask> {
     fn swizzle(self, mask: Mask) -> Self::Output;
 }
 
+pub trait ArraySize<T> {
+    type ARRAY;
+
+    fn ref_mut<'a>(array: &'a mut Self::ARRAY) -> &'a mut [T];
+
+    fn as_ref<'a>(array: &'a Self::ARRAY) -> &'a [T];
+}
+
 /// SwizzleInPlace is used for types where swizzling does not change the type
 /// of the output.
 ///
@@ -43,6 +51,18 @@ macro_rules! swizzle_types {
 
 			unsafe impl SZ for $t {
 				const N: usize = $num;
+			}
+
+			impl<T> ArraySize<T> for $t {
+				type ARRAY = [T; $num];
+
+				fn ref_mut<'a>(array: &'a mut Self::ARRAY) -> &'a mut [T] {
+					array
+				}
+
+				fn as_ref<'a>(array: &'a Self::ARRAY) -> &'a [T] {
+					array
+				}
 			}
 
 			pub const $const: $t = $t {};
