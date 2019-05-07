@@ -1,6 +1,5 @@
 extern crate gl;
 extern crate glfw;
-extern crate parking_lot;
 
 use nalgebra as na;
 use std::cell::Cell;
@@ -181,6 +180,104 @@ mod free_draw {
     pub static mut COLOR_SHADER_TRANSFORM: GLint = 0;
     pub static mut TEX_SHADER_TEX: GLint = 0;
     pub static mut TEX_SHADER_TRANSFORM: GLint = 0;
+}
+
+
+#[allow(non_upper_case_globals)]
+mod uniform_functions {
+    use super::glfw_raw;
+    use std::ffi::CString;
+
+    macro_rules! load_fns {
+        ($($f:ident,)*) => (
+            $(
+                let cs = CString::new(stringify!($f)).unwrap();
+                $f = glfw_raw::glfwGetProcAddress(cs.as_ptr()) as *const _;
+            )*
+        );
+    }
+
+    pub unsafe fn load() {
+        load_fns!(
+            Uniform1fv,
+            Uniform2fv,
+            Uniform3fv,
+            Uniform4fv,
+            Uniform1iv,
+            Uniform2iv,
+            Uniform3iv,
+            Uniform4iv,
+            Uniform1uiv,
+            Uniform2uiv,
+            Uniform3uiv,
+            Uniform4uiv,
+            UniformMatrix2fv,
+            UniformMatrix2x3fv,
+            UniformMatrix2x4fv,
+            UniformMatrix3x2fv,
+            UniformMatrix3fv,
+            UniformMatrix3x4fv,
+            UniformMatrix4x2fv,
+            UniformMatrix4x3fv,
+            UniformMatrix4fv,
+        );
+    }
+
+    #[inline(always)]
+    pub unsafe fn call(location: i32, count: i32, data: &[u32], f: *const std::os::raw::c_void) {
+        (std::mem::transmute::<_, extern "system" fn(i32, i32, *const u32)>(f))(
+            location,
+            count,
+            data.as_ptr(),
+        );
+    }
+
+    #[inline(always)]
+    pub unsafe fn call_mat(
+        location: i32,
+        count: i32,
+        data: &[u32],
+        f: *const std::os::raw::c_void,
+    ) {
+        (std::mem::transmute::<_, extern "system" fn(i32, i32, u8, *const u32)>(f))(
+            location,
+            count,
+            gl::FALSE,
+            data.as_ptr(),
+        );
+    }
+
+    macro_rules! uniform_fn {
+        ($($f:ident,)*) => (
+            $(
+                pub static mut $f: *const std::os::raw::c_void = 0 as *const _;
+            )*
+        )
+    }
+
+    uniform_fn!(
+        Uniform1fv,
+        Uniform2fv,
+        Uniform3fv,
+        Uniform4fv,
+        Uniform1iv,
+        Uniform2iv,
+        Uniform3iv,
+        Uniform4iv,
+        Uniform1uiv,
+        Uniform2uiv,
+        Uniform3uiv,
+        Uniform4uiv,
+        UniformMatrix2fv,
+        UniformMatrix2x3fv,
+        UniformMatrix2x4fv,
+        UniformMatrix3x2fv,
+        UniformMatrix3fv,
+        UniformMatrix3x4fv,
+        UniformMatrix4x2fv,
+        UniformMatrix4x3fv,
+        UniformMatrix4fv,
+    );
 }
 
 impl GlDrawCore {
@@ -388,6 +485,8 @@ impl GlDraw {
                         c_str.unwrap().as_bytes_with_nul().as_ptr() as *const i8
                     ) as *const _
                 });
+                // load the function pointers to uniform fns
+                uniform_functions::load();
             }
 
             // this cannot be done until a context is linked
@@ -582,6 +681,130 @@ impl Drop for GlWindow {
         }
         global_data.num_windows -= 1;
     }
+}
+
+pub mod draw {
+    use super::*;
+    use mesh::uniform;
+    use mesh::Buffer;
+    use mesh::InterfaceBinding;
+    use shader::traits::*;
+    use shader::ShaderProgram;
+    use DrawTypeEnum::*;
+
+    #[derive(Clone, Copy)]
+    pub enum DrawMode {
+        Triangles,
+        TriangleStip,
+        TriangleFan,
+        Lines,
+        LineStrip,
+        LineLoop,
+    }
+
+    impl DrawMode {
+        fn get_mode(self) -> u32 {
+            match self {
+                DrawMode::Triangles => gl::TRIANGLES,
+                DrawMode::TriangleStip => gl::TRIANGLE_STRIP,
+                DrawMode::TriangleFan => gl::TRIANGLE_FAN,
+                DrawMode::Lines => gl::LINES,
+                DrawMode::LineStrip => gl::LINE_STRIP,
+                DrawMode::LineLoop => gl::LINE_LOOP,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct DrawType<'a> {
+        ty: DrawTypeEnum<'a>,
+    }
+
+    impl<'a> DrawType<'a> {
+        fn new(ty: DrawTypeEnum<'a>) -> DrawType<'a> {
+            DrawType { ty: ty }
+        }
+
+        pub fn arrays(start: u32, count: u32) -> DrawType<'static> {
+            DrawType::new(DrawTypeEnum::<'static>::Arrays(start, count))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum DrawTypeEnum<'a> {
+        Arrays(u32, u32),
+        Elements(&'a Buffer, GLenum, u32),
+        MultipleArrays(&'a [u32], &'a [u32]),
+        MultipleElements(&'a Buffer, GLuint, &'a [u32]),
+        InstancedArrays(u32, u32, u32),
+        InstancedElements(&'a Buffer, GLenum, u32, u32),
+    }
+
+    impl<'a> DrawTypeEnum<'a> {
+        unsafe fn draw(self, mode: GLenum) {
+            match self {
+                Arrays(start, count) => {
+                    gl::DrawArrays(mode, start as i32, count as i32);
+                }
+                Elements(buffer, ty, count) => {
+                    gl::BindBuffer(
+                        gl::ELEMENT_ARRAY_BUFFER,
+                        super::inner_gl_unsafe_static().resource_list[buffer.buffer_id as usize],
+                    );
+                    gl::DrawElements(mode, count as i32, ty, ptr::null());
+                }
+                _ => {
+                    unimplemented!();
+                }
+            }
+        }
+    }
+
+    /// The raw drawing function.
+    ///
+    /// This function does not provide any checks to ensure that the buffer have
+    /// enough range to execute the drawing command specified.
+    pub unsafe fn draw_unchecked<
+        In: ShaderArgs,
+        Uniforms: ShaderArgsClass<UniformArgs>,
+        Images: ShaderArgs,
+        Out: ShaderArgs,
+        InData: InterfaceBinding,
+        // Target: FrameBufferBinding,
+    >(
+        window: &GlWindow,
+        shader: &ShaderProgram<In, Uniforms, Images, Out>,
+        in_data: InData,
+        uniform_data: uniform::Uniforms<Uniforms>,
+        draw_type: DrawType,
+        mode: DrawMode,
+        // target: Target,
+    ) {
+        let gl_draw = super::inner_gl_unsafe_static();
+        // activate_window(window);
+        gl::UseProgram(gl_draw.resource_list[shader.program_id as usize]);
+        let vao = window.draw_vao;
+
+        gl::BindVertexArray(vao);
+
+        in_data.bind_all_to_vao(0);
+
+        // target.bind_target();
+
+        let mut slice = &shader.uniform_locations[..];
+        uniform_data.set_uniforms(|| {
+            let s = slice[0];
+            slice = &slice[1..];
+            s as u32
+        });
+
+        draw_type.ty.draw(mode.get_mode());
+
+        gl::BindVertexArray(0);
+
+        gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+    }
+
 }
 
 /// For the lifetime of the DrawingSurface, it is assumed that the active context

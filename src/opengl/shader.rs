@@ -319,11 +319,11 @@ pub mod builtin_vars {
     use super::traits::*;
     use super::{Boolean, Float, Float2, Float3, Float4, Int};
     use super::{ItemRef, VarBuilder, VarString};
-    use crate::swizzle::{AttachBack, AttachFront, RemoveBack, RemoveFront};
+    use crate::tuple::{AttachBack, AttachFront, RemoveBack, RemoveFront};
     use std::marker::PhantomData;
 
     pub unsafe trait BuiltInOutput<T: ArgType> {
-        unsafe fn as_t(self) -> Option<T>;
+        unsafe fn as_t(self, scope: ScopeGaurd) -> (Option<T>, ScopeGaurd);
     }
 
     pub(super) trait BuiltInOutputs {
@@ -331,19 +331,29 @@ pub mod builtin_vars {
     }
 
     unsafe impl<T: ArgType> BuiltInOutput<T> for () {
-        unsafe fn as_t(self) -> Option<T> {
-            None
+        unsafe fn as_t(self, scope: ScopeGaurd) -> (Option<T>, ScopeGaurd) {
+            (None, scope)
         }
     }
 
     unsafe impl<T: ArgType, S: IntoArg<Arg = T>> BuiltInOutput<T> for S {
-        unsafe fn as_t(self) -> Option<T> {
-            Some(self.into_arg())
+        unsafe fn as_t(self, scope: ScopeGaurd) -> (Option<T>, ScopeGaurd) {
+            let (arg, s) = self.into_arg();
+            (Some(arg), s.merge(scope))
         }
     }
 
     fn create_in<S: ExprType<T>, T: ArgType>(s: &'static str) -> S {
-        unsafe { S::from_t(T::create(VarString::new(s), ItemRef::Static)) }
+        unsafe {
+            S::from_t(
+                T::create(VarString::new(s), ItemRef::Static),
+                ScopeGaurd::Free,
+            )
+        }
+    }
+
+    fn create_in_with_scope<S: ExprType<T>, T: ArgType>(s: &'static str, scope: ScopeGaurd) -> S {
+        unsafe { S::from_t(T::create(VarString::new(s), ItemRef::Static), scope) }
     }
 
     pub struct BuiltInVertInputs {
@@ -355,7 +365,7 @@ pub mod builtin_vars {
     }
 
     impl BuiltInVertInputs {
-        pub(super) fn new() -> BuiltInVertInputs {
+        pub(super) fn new(_scope: ScopeGaurd) -> BuiltInVertInputs {
             BuiltInVertInputs {
                 vertex_id: create_in("gl_VertexID"),
                 instance_id: create_in("gl_InstanceID"),
@@ -367,20 +377,18 @@ pub mod builtin_vars {
     }
 
     pub struct BuiltInVertOutputs {
-        position: Option<Float4>,
+        position: Float4,
         point_size: Option<Float>,
         clip_distance: (),
+        scope: ScopeGaurd,
     }
 
     impl BuiltInOutputs for BuiltInVertOutputs {
         fn get_strings(self, builder: &mut VarBuilder) -> String {
-            let mut string = String::new();
-            if let Some(p) = self.position {
-                string = format!(
-                    "   gl_Position = {};\n",
-                    builder.format_var(&p.as_shader_data())
-                );
-            }
+            let mut string = format!(
+                "   gl_Position = {};\n",
+                builder.format_var(&self.position.as_shader_data())
+            );
             if let Some(s) = self.point_size {
                 string = format!(
                     "{}   gl_PointSize = {};\n",
@@ -393,35 +401,30 @@ pub mod builtin_vars {
     }
 
     impl BuiltInVertOutputs {
-        pub fn empty() -> BuiltInVertOutputs {
-            unsafe {
-                BuiltInVertOutputs {
-                    position: None,
-                    point_size: None,
-                    clip_distance: (),
-                }
-            }
-        }
-
         pub fn position<T: IntoArg<Arg = Float4>>(position: T) -> BuiltInVertOutputs {
             unsafe {
+                let (arg, scope) = position.into_arg();
                 BuiltInVertOutputs {
-                    position: Some(position.into_arg()),
+                    position: arg,
                     point_size: None,
                     clip_distance: (),
+                    scope: scope,
                 }
             }
         }
 
-        pub fn create<T: BuiltInOutput<Float4>, S: BuiltInOutput<Float>>(
+        pub fn create<T: IntoArg<Arg = Float4>, S: BuiltInOutput<Float>>(
             position: T,
             point_size: S,
         ) -> BuiltInVertOutputs {
             unsafe {
+                let (arg, scope) = position.into_arg();
+                let (point, scope) = point_size.as_t(scope);
                 BuiltInVertOutputs {
-                    position: position.as_t(),
-                    point_size: point_size.as_t(),
+                    position: arg,
+                    point_size: point,
                     clip_distance: (),
+                    scope: scope,
                 }
             }
         }
@@ -438,7 +441,7 @@ pub mod builtin_vars {
     }
 
     impl BuiltInFragInputs {
-        pub(super) fn new() -> BuiltInFragInputs {
+        pub(super) fn new(_scope: ScopeGaurd) -> BuiltInFragInputs {
             BuiltInFragInputs {
                 frag_coord: create_in("gl_FragCoord"),
                 point_coord: create_in("gl_PointCoord"),
@@ -454,6 +457,7 @@ pub mod builtin_vars {
     pub struct BuiltInFragOutputs {
         depth: Option<Float>,
         discard: Option<Boolean>,
+        scope: ScopeGaurd,
     }
 
     impl BuiltInOutputs for BuiltInFragOutputs {
@@ -481,14 +485,17 @@ pub mod builtin_vars {
             BuiltInFragOutputs {
                 depth: None,
                 discard: None,
+                scope: ScopeGaurd::Free,
             }
         }
 
         pub fn depth<T: IntoArg<Arg = Float>>(depth: T) -> BuiltInFragOutputs {
             unsafe {
+                let (arg, scope) = depth.into_arg();
                 BuiltInFragOutputs {
-                    depth: Some(depth.into_arg()),
+                    depth: Some(arg),
                     discard: None,
+                    scope: scope,
                 }
             }
         }
@@ -498,43 +505,32 @@ pub mod builtin_vars {
             discard: S,
         ) -> BuiltInFragOutputs {
             unsafe {
+                let scope = ScopeGaurd::Free;
+                let (depth, scope) = depth.as_t(scope);
+                let (discard, scope) = discard.as_t(scope);
                 BuiltInFragOutputs {
-                    depth: depth.as_t(),
-                    discard: discard.as_t(),
+                    depth: depth,
+                    discard: discard,
+                    scope: scope,
                 }
             }
         }
     }
 }
 
-/// A type that is used internally, but it is used by ProgramPrototype so
-/// it has to be public.
-#[derive(Clone, Copy)]
-pub enum VarType {
-    Declare(&'static str, usize),
-    Internal(&'static str),
-}
-
-impl fmt::Display for VarType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            VarType::Declare(s, n) => write!(f, "{}{}", s, n),
-            VarType::Internal(s) => write!(f, "{}", s),
-        }
-    }
-}
-
 use super::GlResource;
 
-pub struct ShaderProgram<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> {
-    uniform_locations: Vec<GLint>,
-    program_id: u32,
+pub struct ShaderProgram<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs>
+{
+    pub(crate) uniform_locations: Vec<GLint>,
+    pub(crate) image_locations: Vec<GLint>,
+    pub(crate) program_id: u32,
     // need to make sure the type is not send or sync
-    phantom: PhantomData<(In, Uniforms, Out, std::rc::Rc<()>)>,
+    phantom: PhantomData<(In, Uniforms, Images, Out, std::rc::Rc<()>)>,
 }
 
-impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> Drop
-    for ShaderProgram<In, Uniforms, Out>
+impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs> Drop
+    for ShaderProgram<In, Uniforms, Images, Out>
 {
     fn drop(&mut self) {
         let gl_draw = unsafe { super::inner_gl_unsafe() };
@@ -543,7 +539,7 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> Drop
 }
 
 #[cfg(not(feature = "opengl41"))]
-impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
+impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs> GlResource
     for ShaderProgram<In, Uniforms, Out>
 {
     unsafe fn adopt(ptr: *mut (), id: u32) -> Option<*mut ()> {
@@ -574,11 +570,10 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
 }
 
 #[cfg(feature = "opengl41")]
-impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
-    for ShaderProgram<In, Uniforms, Out>
+impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs> GlResource
+    for ShaderProgram<In, Uniforms, Images, Out>
 {
     unsafe fn adopt(ptr: *mut (), id: u32) -> Option<*mut ()> {
-        println!("adopt");
         let gl_draw = super::inner_gl_unsafe();
         let [data_len, format, drop_len] = ptr::read(ptr as *const [u32; 3]);
         let ptr = ptr as *mut u32;
@@ -591,20 +586,17 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
     }
 
     unsafe fn drop_while_orphaned(ptr: *mut (), _id: u32) {
-        println!("drop");
         let [_, _, drop_len] = ptr::read(ptr as *const [u32; 3]);
         let _drop_vec = Vec::from_raw_parts(ptr, drop_len as usize, drop_len as usize);
         // drop the data
     }
 
     unsafe fn cleanup(_ptr: *mut (), _id: u32) {
-        println!("cleanup");
         // nothing needs to be done here, since a shader does not
         // store any data in the pointer when not in an orphan state
     }
 
     unsafe fn orphan(id: u32, _ptr: *mut ()) -> *mut () {
-        println!("orphan");
         let gl_draw = super::inner_gl_unsafe();
         let program = gl_draw.resource_list[id as usize];
         let mut len = 0;
@@ -631,17 +623,21 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> GlResource
     }
 }
 
-impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> ShaderProgram<In, Uniforms, Out> {
+impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs>
+    ShaderProgram<In, Uniforms, Images, Out>
+{
     #[cfg(feature = "opengl41")]
     fn new(
         program: GLuint,
         uniform_locations: Vec<GLint>,
+        image_locations: Vec<GLint>,
         _vsource: CString,
         _fsource: CString,
-    ) -> ShaderProgram<In, Uniforms, Out> {
+    ) -> ShaderProgram<In, Uniforms, Images, Out> {
         let gl_draw = unsafe { super::inner_gl_unsafe() };
         ShaderProgram {
             uniform_locations: uniform_locations,
+            image_locations: image_locations,
             program_id: gl_draw.get_resource_generic::<Self>(program, None),
             phantom: PhantomData,
         }
@@ -651,15 +647,17 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> ShaderProgram<In, Un
     fn new(
         program: GLuint,
         uniform_locations: Vec<GLint>,
+        image_locations: Vec<GLint>,
         vsource: CString,
         fsource: CString,
-    ) -> ShaderProgram<In, Uniforms, Out> {
+    ) -> ShaderProgram<In, Uniforms, Images, Out> {
         let gl_draw = super::inner_gl_unsafe();
         let b = Box::new([vsource, fsource]);
         let ptr = b.as_mut_ptr();
         mem::forget(b);
         ShaderProgram {
             uniform_locations: uniform_locations,
+            image_locations: image_locations,
             program_id: gl_draw.get_resource_generic::<Self>(program, Some(ptr)),
             phantom: PhantomData,
         }
@@ -672,59 +670,76 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Out: ShaderArgs> ShaderProgram<In, Un
 /// most common use is for lighting calculations. Shaders are a lower level feature
 /// that can be difficult to use correctly.
 pub fn create_program<
-    Uniforms: ShaderArgs,
+    Uniforms: ShaderArgs + ShaderArgsClass<UniformArgs>,
+    Images: ShaderArgs + ShaderArgsClass<ImageArgs>,
     In: ShaderArgs + ShaderArgsClass<TransparentArgs>,
     Pass: IntoArgs,
     Out: IntoArgs,
-    VertFN: FnOnce(In::AsVarying, Uniforms::AsUniform, BuiltInVertInputs) -> (Pass, BuiltInVertOutputs),
+    VertFN: FnOnce(
+        In::AsVarying,
+        Uniforms::AsUniform,
+        Images::AsUniform,
+        BuiltInVertInputs,
+    ) -> (Pass, BuiltInVertOutputs),
     FragFN: FnOnce(
         <Pass::Args as ShaderArgs>::AsVarying,
         Uniforms::AsUniform,
+        Images::AsUniform,
         BuiltInFragInputs,
     ) -> (Out, BuiltInFragOutputs),
 >(
     _window: &super::GlWindow,
     vertex_shader_fn: VertFN,
     fragment_shader_fn: FragFN,
-) -> ShaderProgram<In, Uniforms, Out::Args>
+) -> ShaderProgram<In, Uniforms, Images, Out::Args>
 where
     Out::Args: ShaderArgs + ShaderArgsClass<TransparentArgs> + ShaderArgsClass<OutputArgs>,
     Pass::Args: ShaderArgsClass<TransparentArgs>,
 {
+    let v_scope = Rc::new(());
     let v_string = CString::new(create_shader_string::<
         In,
         Uniforms,
+        Images,
         Pass,
         BuiltInVertInputs,
         BuiltInVertOutputs,
         VertFN,
     >(
         vertex_shader_fn,
-        BuiltInVertInputs::new(),
+        BuiltInVertInputs::new(ScopeGaurd::Limited(v_scope.clone(), 0)),
         "in",
         "u",
+        "tex",
         "pass",
+        ScopeGaurd::Limited(v_scope.clone(), 0),
         true,
         false,
     ))
     .unwrap();
+    let _ = Rc::try_unwrap(v_scope).expect("A value was moved out of the vertex shader generator and stored elsewhere. This is not allowed because it could cause generation of an invalid shader.");
+    let f_scope = Rc::new(());
     let f_string = CString::new(create_shader_string::<
         Pass::Args,
         Uniforms,
+        Images,
         Out,
         BuiltInFragInputs,
         BuiltInFragOutputs,
         FragFN,
     >(
         fragment_shader_fn,
-        BuiltInFragInputs::new(),
+        BuiltInFragInputs::new(ScopeGaurd::Limited(f_scope.clone(), 0)),
         "pass",
         "u",
+        "tex",
         "out",
+        ScopeGaurd::Limited(f_scope.clone(), 0),
         false,
         true,
     ))
     .unwrap();
+    let _ = Rc::try_unwrap(f_scope).expect("A value was moved out of the fragment shader generator and stored elsewhere. This is not allowed because it could cause generation of an invalid shader.");
     let program = get_program(v_string.as_bytes_with_nul(), f_string.as_bytes_with_nul());
     if cfg!(feature = "opengl41") {
         unsafe {
@@ -744,7 +759,22 @@ where
             );
         }
     }
-    ShaderProgram::new(program, uniform_locations, v_string, f_string)
+    let mut image_locations = vec![0; Images::NARGS];
+    for i in 0..Images::NARGS {
+        unsafe {
+            image_locations[i] = gl::GetUniformLocation(
+                program,
+                CString::new(format!("tex{}", i)).unwrap().as_ptr() as *const _,
+            );
+        }
+    }
+    ShaderProgram::new(
+        program,
+        uniform_locations,
+        image_locations,
+        v_string,
+        f_string,
+    )
 }
 
 #[cfg(not(feature = "opengl41"))]
@@ -771,17 +801,20 @@ const VERSION: &str = "#version 460 core";
 fn create_shader_string<
     In: ShaderArgs + ShaderArgsClass<TransparentArgs>,
     Uniforms: ShaderArgs,
+    Images: ShaderArgs,
     Out: IntoArgs,
     T,
     S: builtin_vars::BuiltInOutputs,
-    Shader: FnOnce(In::AsVarying, Uniforms::AsUniform, T) -> (Out, S),
+    Shader: FnOnce(In::AsVarying, Uniforms::AsUniform, Images::AsUniform, T) -> (Out, S),
 >(
     generator: Shader,
     gen_in: T,
 
     in_str: &'static str,
     uniform_str: &'static str,
+    image_str: &'static str,
     out_str: &'static str,
+    scope: ScopeGaurd,
 
     input_qualifiers: bool,
     output_qualifiers: bool,
@@ -819,6 +852,17 @@ where
         );
     }
     shader = format!("{}\n", shader);
+    let image_args = Images::map_args().args;
+    for i in 0..Uniforms::NARGS {
+        shader = format!(
+            "{}uniform {} {}{};\n",
+            shader,
+            image_args[i].gl_type(),
+            image_str,
+            i,
+        );
+    }
+    shader = format!("{}\n", shader);
     let out_args = Out::Args::map_args().args;
     let mut position = 0;
     for i in 0..Out::Args::NARGS {
@@ -846,11 +890,13 @@ where
     // ensure that the names created are defined in the shader.
     let in_type = unsafe { In::create(in_str) };
     let uniform_type = unsafe { Uniforms::create(out_str) };
+    let image_type = unsafe { Images::create(image_str) };
     let (out, bout) = unsafe {
-        let input = in_type.as_varying();
-        let output = uniform_type.as_uniform();
-        let (out, builtin) = generator(input, output, gen_in);
-        (out.into_args().map_data_args().args, builtin)
+        let input = in_type.as_varying(scope.clone());
+        let image = image_type.as_uniform(scope.clone());
+        let uniform = uniform_type.as_uniform(scope);
+        let (out, builtin) = generator(input, uniform, image, gen_in);
+        (out.into_args().0.map_data_args().args, builtin)
     };
     shader = format!("{}\n\nvoid main() {{\n", shader);
     let mut builder = VarBuilder::new("var");
@@ -953,12 +999,12 @@ pub(super) fn get_program(vertex_source: &[u8], fragment_source: &[u8]) -> GLuin
 use self::swizzle::SwizzleMask;
 /// Swizzling operations are an important part of glsl.
 pub mod swizzle {
-    use super::super::super::swizzle as sz;
-    use super::super::super::swizzle::{Swizzle, SZ};
     use super::traits::ArgType;
+    use crate::tuple;
+    use tuple::TupleIndex;
 
     pub unsafe trait GlSZ {
-        type S: SZ;
+        type S;
 
         type Set;
 
@@ -998,7 +1044,7 @@ pub mod swizzle {
 
         	impl_swizzle!(;Vec4, Vec3, Vec2, Vec1,;$($vals,)*);
 
-        	swizzle_set!($set, $($vals),*;$($vars),*;sz::R3, sz::R2, sz::R1, sz::R0);
+        	// swizzle_set!($set, $($vals),*;$($vars),*;tuple::T3, tuple::T2, tuple::T1, tuple::T0);
         )
     }
 
@@ -1069,7 +1115,7 @@ pub mod api {
 #[allow(unused, unused_parens)]
 pub mod traits {
     use super::swizzle::SwizzleMask;
-    use super::{DataType, ItemRef, ShaderArgDataList, ShaderArgList, VarExpr, VarString, VarType};
+    use super::{DataType, ItemRef, ShaderArgDataList, ShaderArgList, VarExpr, VarString};
     use std::ops::{Add, Div, Mul, Neg, Sub};
 
     pub unsafe trait GlDataType: Copy {
@@ -1114,80 +1160,80 @@ pub mod traits {
     }
 
     pub unsafe trait ExprType<T: ArgType>: Clone {
-        unsafe fn into_t(self) -> T;
+        unsafe fn into_t(self) -> (T, ScopeGaurd);
 
-        unsafe fn from_t(t: T) -> Self;
+        unsafe fn from_t(t: T, scope: ScopeGaurd) -> Self;
     }
 
     pub trait IntoArg {
         type Arg: ArgType;
 
-        unsafe fn into_arg(self) -> Self::Arg;
+        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd);
     }
 
     pub trait IntoArgs {
         type Args: ShaderArgs;
 
-        unsafe fn into_args(self) -> Self::Args;
+        unsafe fn into_args(self) -> (Self::Args, ScopeGaurd);
     }
 
     pub trait IntoConstant<T: ArgType> {
-        fn into_constant(self) -> Constant<T>;
+        fn into_constant(self, scope: ScopeGaurd) -> Constant<T>;
     }
 
     pub trait IntoUniform<T: ArgType> {
-        fn into_uniform(self) -> Uniform<T>;
+        fn into_uniform(self, scope: ScopeGaurd) -> Uniform<T>;
     }
 
     pub trait IntoVarying<T: ArgType> {
-        fn into_varying(self) -> Varying<T>;
+        fn into_varying(self, scope: ScopeGaurd) -> Varying<T>;
     }
 
     impl<T: ArgType> IntoArg for Constant<T> {
         type Arg = T;
 
-        unsafe fn into_arg(self) -> Self::Arg {
-            self.arg
+        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd) {
+            (self.arg, self.scope)
         }
     }
 
     impl<T: ArgType> IntoArg for Uniform<T> {
         type Arg = T;
 
-        unsafe fn into_arg(self) -> Self::Arg {
-            self.arg
+        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd) {
+            (self.arg, self.scope)
         }
     }
 
     impl<T: ArgType> IntoArg for Varying<T> {
         type Arg = T;
 
-        unsafe fn into_arg(self) -> Self::Arg {
-            self.arg
+        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd) {
+            (self.arg, self.scope)
         }
     }
 
     impl<T: ArgType> IntoArg for &Constant<T> {
         type Arg = T;
 
-        unsafe fn into_arg(self) -> Self::Arg {
-            self.arg.clone()
+        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd) {
+            (self.arg.clone(), self.scope.clone())
         }
     }
 
     impl<T: ArgType> IntoArg for &Uniform<T> {
         type Arg = T;
 
-        unsafe fn into_arg(self) -> Self::Arg {
-            self.arg.clone()
+        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd) {
+            (self.arg.clone(), self.scope.clone())
         }
     }
 
     impl<T: ArgType> IntoArg for &Varying<T> {
         type Arg = T;
 
-        unsafe fn into_arg(self) -> Self::Arg {
-            self.arg.clone()
+        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd) {
+            (self.arg.clone(), self.scope.clone())
         }
     }
 
@@ -1213,6 +1259,7 @@ pub mod traits {
                 fn $op_func(self, rhs: $r<R>) -> $o<O> {
                     $o {
                         arg: $op::$op_func(self.arg, rhs.arg),
+                        scope: self.scope.merge(rhs.scope),
                     }
                 }
             }
@@ -1223,8 +1270,10 @@ pub mod traits {
                 type Output = $o<O>;
 
                 fn $op_func(self, rhs: $r<R>) -> $o<O> {
+                    let se = self.clone();
                     $o {
-                        arg: $op::$op_func(self.clone().arg, rhs.arg),
+                        arg: $op::$op_func(se.arg, rhs.arg),
+                        scope: se.scope.merge(rhs.scope),
                     }
                 }
             }
@@ -1235,8 +1284,10 @@ pub mod traits {
                 type Output = $o<O>;
 
                 fn $op_func(self, rhs: &$r<R>) -> $o<O> {
+                    let other = rhs.clone();
                     $o {
-                        arg: $op::$op_func(self.arg, rhs.clone().arg),
+                        arg: $op::$op_func(self.arg, other.arg),
+                        scope: self.scope.merge(other.scope),
                     }
                 }
             }
@@ -1247,8 +1298,11 @@ pub mod traits {
                 type Output = $o<O>;
 
                 fn $op_func(self, rhs: &$r<R>) -> $o<O> {
+                    let se = self.clone();
+                    let other = rhs.clone();
                     $o {
-                        arg: $op::$op_func(self.clone().arg, rhs.clone().arg),
+                        arg: $op::$op_func(se.arg, other.arg),
+                        scope: se.scope.merge(other.scope),
                     }
                 }
             }
@@ -1261,20 +1315,29 @@ pub mod traits {
     wrapper_ops!(Div, div);
 
     impl<T: ArgType> IntoConstant<T> for T {
-        fn into_constant(self) -> Constant<T> {
-            Constant { arg: self }
+        fn into_constant(self, scope: ScopeGaurd) -> Constant<T> {
+            Constant {
+                arg: self,
+                scope: scope,
+            }
         }
     }
 
     impl<T: ArgType> IntoUniform<T> for T {
-        fn into_uniform(self) -> Uniform<T> {
-            Uniform { arg: self }
+        fn into_uniform(self, scope: ScopeGaurd) -> Uniform<T> {
+            Uniform {
+                arg: self,
+                scope: scope,
+            }
         }
     }
 
     impl<T: ArgType> IntoVarying<T> for T {
-        fn into_varying(self) -> Varying<T> {
-            Varying { arg: self }
+        fn into_varying(self, scope: ScopeGaurd) -> Varying<T> {
+            Varying {
+                arg: self,
+                scope: scope,
+            }
         }
     }
 
@@ -1286,7 +1349,7 @@ pub mod traits {
         type Min: ExprType<T>;
     }
 
-    impl<A: ArgType, T: crate::swizzle::RemoveFront> ExprMin<A> for T
+    impl<A: ArgType, T: crate::tuple::RemoveFront> ExprMin<A> for T
     where
         T::Front: ExprCombine<A>,
         T::Remaining: ExprCombine<A>,
@@ -1385,48 +1448,96 @@ pub mod traits {
         type Min = Varying<T>;
     }
 
+    use std::rc::Rc;
+
+    /// This type must be public because it is used in the methods for the public
+    /// trait `ShaderArgs`
+    #[derive(Clone)]
+    pub enum ScopeGaurd {
+        // free is used for built in inputs and constants, where
+        // it won't break anything to use the input between invocations.
+        // This is useful because constant initializers for types don't
+        // have any way of accessing a scope, and indeed can be called outside
+        // of a generation function
+        Free,
+        Limited(Rc<()>, usize),
+    }
+
+    impl ScopeGaurd {
+        pub(super) fn merge(self, other: ScopeGaurd) -> ScopeGaurd {
+            match (self, other) {
+                (ScopeGaurd::Free, ScopeGaurd::Free) => ScopeGaurd::Free,
+                (ScopeGaurd::Free, ScopeGaurd::Limited(rc, depth)) => {
+                    ScopeGaurd::Limited(rc, depth)
+                }
+                (ScopeGaurd::Limited(rc, depth), ScopeGaurd::Free) => {
+                    ScopeGaurd::Limited(rc, depth)
+                }
+                (ScopeGaurd::Limited(rc1, depth1), ScopeGaurd::Limited(rc2, depth2)) => {
+                    if depth1 > depth2 {
+                        ScopeGaurd::Limited(rc1, depth1)
+                    } else {
+                        ScopeGaurd::Limited(rc2, depth2)
+                    }
+                }
+            }
+        }
+    }
+
     #[derive(Clone)]
     pub struct Constant<T: ArgType> {
         pub(super) arg: T,
+        pub(super) scope: ScopeGaurd,
     }
 
     #[derive(Clone)]
     pub struct Uniform<T: ArgType> {
         pub(super) arg: T,
+        pub(super) scope: ScopeGaurd,
     }
 
     #[derive(Clone)]
     pub struct Varying<T: ArgType> {
         pub(super) arg: T,
+        pub(super) scope: ScopeGaurd,
     }
 
     unsafe impl<T: ArgType> ExprType<T> for Constant<T> {
-        unsafe fn into_t(self) -> T {
-            self.arg
+        unsafe fn into_t(self) -> (T, ScopeGaurd) {
+            (self.arg, self.scope)
         }
 
-        unsafe fn from_t(t: T) -> Self {
-            Constant { arg: t }
+        unsafe fn from_t(t: T, scope: ScopeGaurd) -> Self {
+            Constant {
+                arg: t,
+                scope: scope,
+            }
         }
     }
 
     unsafe impl<T: ArgType> ExprType<T> for Uniform<T> {
-        unsafe fn into_t(self) -> T {
-            self.arg
+        unsafe fn into_t(self) -> (T, ScopeGaurd) {
+            (self.arg, self.scope)
         }
 
-        unsafe fn from_t(t: T) -> Self {
-            Uniform { arg: t }
+        unsafe fn from_t(t: T, scope: ScopeGaurd) -> Self {
+            Uniform {
+                arg: t,
+                scope: scope,
+            }
         }
     }
 
     unsafe impl<T: ArgType> ExprType<T> for Varying<T> {
-        unsafe fn into_t(self) -> T {
-            self.arg
+        unsafe fn into_t(self) -> (T, ScopeGaurd) {
+            (self.arg, self.scope)
         }
 
-        unsafe fn from_t(t: T) -> Self {
-            Varying { arg: t }
+        unsafe fn from_t(t: T, scope: ScopeGaurd) -> Self {
+            Varying {
+                arg: t,
+                scope: scope,
+            }
         }
     }
 
@@ -1444,21 +1555,21 @@ pub mod traits {
     pub unsafe trait ArgClass: Copy {}
 
     pub unsafe trait ArgParameter<T: ArgClass> {
-        const PARAM: T;
+        fn get_param() -> T;
     }
 
     unsafe impl ArgClass for () {}
 
     unsafe impl<T: ArgType> ArgParameter<()> for T {
-        const PARAM: () = ();
+        fn get_param() {}
     }
 
     /// Most arg types, but not opaque types like samplers.
     #[derive(Clone, Copy)]
     pub struct TransparentArgs {
         // the number of locations can be different depening on where the type is used
-        pub num_locations: usize,
-        pub num_input_locations: usize,
+        pub num_locations: u32,
+        pub num_input_locations: u32,
     }
 
     unsafe impl ArgClass for TransparentArgs {}
@@ -1470,6 +1581,24 @@ pub mod traits {
     pub struct OutputArgs;
 
     unsafe impl ArgClass for OutputArgs {}
+
+    #[derive(Clone, Copy)]
+    pub struct UniformArgs {
+        pub num_elements: u32,
+        pub array_count: u32,
+        pub is_mat: bool,
+        // note: two layers of indirection are needed for a couple of reasons
+        // first, the function pointers are re-loaded when the context is reset
+        // second, this will allow get_param to be a constant function in the future
+        pub func: *const *const std::os::raw::c_void,
+    }
+
+    unsafe impl ArgClass for UniformArgs {}
+
+    #[derive(Clone, Copy)]
+    pub struct ImageArgs;
+
+    unsafe impl ArgClass for ImageArgs {}
 
     /// ShaderArgs is a trait that is implemented for types of
     /// possible opengl argument sets
@@ -1483,9 +1612,9 @@ pub mod traits {
 
         type AsVarying;
 
-        unsafe fn as_uniform(self) -> Self::AsUniform;
+        unsafe fn as_uniform(self, scope: ScopeGaurd) -> Self::AsUniform;
 
-        unsafe fn as_varying(self) -> Self::AsVarying;
+        unsafe fn as_varying(self, scope: ScopeGaurd) -> Self::AsVarying;
 
         fn map_args() -> ShaderArgList;
 
@@ -1523,14 +1652,14 @@ pub mod traits {
 
                 type AsVarying = ($(Varying<$name>),*);
 
-                unsafe fn as_uniform(self) -> Self::AsUniform {
+                unsafe fn as_uniform(self, scope: ScopeGaurd) -> Self::AsUniform {
                     let ($($name,)*) = self;
-                    ($(Uniform::from_t($name)),*)
+                    ($(Uniform::from_t($name, scope.clone())),*)
                 }
 
-                unsafe fn as_varying(self) -> Self::AsVarying {
+                unsafe fn as_varying(self, scope: ScopeGaurd) -> Self::AsVarying {
                     let ($($name,)*) = self;
-                    ($(Varying::from_t($name)),*)
+                    ($(Varying::from_t($name, scope.clone())),*)
                 }
 
 				fn map_args() -> ShaderArgList {
@@ -1550,15 +1679,25 @@ pub mod traits {
             impl<$($name: IntoArg),*> IntoArgs for ($($name),*) {
                 type Args = ($($name::Arg,)*);
 
-                unsafe fn into_args(self) -> ($($name::Arg,)*) {
+                unsafe fn into_args(self) -> (Self::Args, ScopeGaurd) {
                     let ($($name),*) = self;
-                    ($($name.into_arg(),)*)
+                    let mut scope = ScopeGaurd::Free;
+                    // I want to take a moment to thank Rust for allowing this
+                    // type of syntax
+                    (($({
+                        let x = $name.into_arg();
+                        scope = scope.merge(x.1);
+                        x.0
+                    },)*), scope)
                 }
             }
 
             unsafe impl<T: ArgClass, $($name: ArgType + ArgParameter<T>),*> ShaderArgsClass<T> for ($($name,)*) {
                 fn get_param(i: usize) -> T {
-                    [$($name::PARAM),*][i]
+                    // note: create an array of function pointers and call the ith one
+                    // this is likely faster and more optimizable.
+                    let a: [fn() -> T; $num] = [$($name::get_param),*];
+                    (a[i])()
                 }
             }
 		)
@@ -1732,7 +1871,8 @@ macro_rules! vec_type {
 
             fn $vec(self) -> Self::Out {
                 unsafe {
-                    S::Min::from_t(self.into_args().as_arg())
+                    let (t, scope) = self.into_args();
+                    S::Min::from_t(t.as_arg(), scope)
                 }
             }
         }
@@ -1762,7 +1902,9 @@ macro_rules! vec_type {
         }
 
         unsafe impl ArgParameter<TransparentArgs> for $vec_type {
-            const PARAM: TransparentArgs = TransparentArgs { num_input_locations: 1, num_locations: 1 };
+            fn get_param() -> TransparentArgs {
+                TransparentArgs { num_input_locations: 1, num_locations: 1 }
+            }
         }
 
         subs!($trait, $vec, $vec_type ;  ; $($sub,)*);
@@ -1862,8 +2004,10 @@ macro_rules! vec_swizzle {
             fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(&self, _mask: T) -> <Self as ExprCombine<T::Out>>::Min
             where Self: ExprCombine<T::Out> {
                 unsafe {
+                    let (t, scope) = self.clone().into_t();
                     <Self as ExprCombine<T::Out>>::Min::from_t(
-                        T::Out::create(var_format!("", ".", ""; self.clone().into_t().data.data.into_inner(), VarString::new(T::get_vars())), Expr)
+                        T::Out::create(var_format!("", ".", ""; t.data.data.into_inner(), VarString::new(T::get_vars())), Expr),
+                        scope,
                     )
                 }
             }
@@ -1875,10 +2019,12 @@ macro_rules! vec_swizzle {
             fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(&self, _mask: T) -> <Self as ExprCombine<T::Out>>::Min
             where Self: ExprCombine<T::Out> {
                 unsafe {
+                    let (t, scope) = self.clone().into_t();
                     // convieniently, opengl allows syntax like `vec4(1.0)`
                     <Self as ExprCombine<T::Out>>::Min::from_t(
-                        T::Out::create(var_format!("", "(", ")"; T::Out::data_type(), self.clone().into_t().data.data.into_inner(), Expr))
-                    )
+                        T::Out::create(var_format!("", "(", ")"; T::Out::data_type(), t.data.data.into_inner(), Expr),
+                        scope,
+                    ))
                 }
             }
         }
@@ -1889,8 +2035,10 @@ macro_rules! vec_swizzle {
 			fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(&self, _mask: T) -> <Self as ExprCombine<T::Out>>::Min
             where Self: ExprCombine<T::Out> {
                 unsafe {
+                    let (t, scope) = self.clone().into_t();
     				<Self as ExprCombine<T::Out>>::Min::from_t(
-    					T::Out::create(var_format!("", ".", ""; self.clone().into_t().data.data.into_inner(), VarString::new(T::get_vars())), Expr)
+    					T::Out::create(var_format!("", ".", ""; t.data.data.into_inner(), VarString::new(T::get_vars())), Expr),
+                        scope
     				)
                 }
 			}
@@ -1914,7 +2062,8 @@ macro_rules! vec_litteral {
                 let tup!($f0,$($f,)*) = self;
                 Constant {
                     arg: $v0::new(var_format!("", "(", ")"; VarString::new($v0::data_type().gl_type()),
-                        VarString::new(concat!(format!("{}{}", $f0, $tag),$(format!("{}{}", $f, $tag),)*))), Expr)
+                        VarString::new(concat!(format!("{}{}", $f0, $tag),$(format!("{}{}", $f, $tag),)*))), Expr),
+                    scope: ScopeGaurd::Free,
                 }
             }
         }
@@ -1953,7 +2102,9 @@ macro_rules! vec_output {
     ($($vec_type:ident),*) => (
         $(
             unsafe impl ArgParameter<OutputArgs> for $vec_type {
-                const PARAM: OutputArgs = OutputArgs {};
+                fn get_param() -> OutputArgs {
+                    OutputArgs
+                }
             }
         )*
     )
@@ -2016,7 +2167,8 @@ macro_rules! impl_matrix {
 
             fn $matrix_fn(self) -> Self::Out {
                 unsafe {
-                    S::Min::from_t(self.into_args().as_arg())
+                    let (args, scope) = self.into_args();
+                    S::Min::from_t(args.as_arg(), scope)
                 }
             }
         }
@@ -2106,7 +2258,9 @@ macro_rules! matrix_param {
     (;$cols:expr) => ();
     ($mat:ident, $($m:ident,)*; $cols:expr) => (
         unsafe impl ArgParameter<TransparentArgs> for $mat {
-            const PARAM: TransparentArgs = TransparentArgs { num_locations: 1, num_input_locations: $cols };
+            fn get_param() -> TransparentArgs {
+                TransparentArgs { num_locations: 1, num_input_locations: $cols }
+            }
         }
         matrix_param!($($m,)*;$cols - 1);
     )

@@ -1,13 +1,12 @@
 use super::shader;
 use super::shader::traits::*;
 use super::{inner_gl_unsafe, inner_gl_unsafe_static, GlResource};
-use crate::swizzle;
+use crate::tuple::TupleIndex;
+use crate::tuple::{AttachFront, RemoveFront};
 use gl;
 use gl::types::*;
 use shader::{Float, Float2, Float3, Float4, Int, Int2, Int3, Int4, UInt, UInt2, UInt3, UInt4};
 use std::marker::PhantomData;
-use swizzle::Swizzle4;
-use swizzle::{AttachFront, RemoveFront};
 
 use std::mem;
 use std::ptr;
@@ -36,9 +35,11 @@ pub enum BindingType {
     I32,
 }
 
+#[derive(Clone, Copy)]
 struct MeshBufferBinding {
     buffer: u32,
     size: u8,
+    instance_divisor: u8,
     btype: BindingType,
     offset: u32,
     stride: u32,
@@ -120,7 +121,7 @@ impl<T: GlDataType> VertexBuffer<T> {
 pub unsafe trait InterfaceBinding {
     type Bind: ShaderArgs;
 
-    unsafe fn bind_all_to_vao<F: FnMut() -> u32>(self, locations: F);
+    unsafe fn bind_all_to_vao(self, location: u32);
 }
 
 unsafe impl<T: ArgType + ArgParameter<TransparentArgs>, B: BindBuffer<T>> InterfaceBinding
@@ -130,15 +131,15 @@ where
 {
     type Bind = (T,);
 
-    unsafe fn bind_all_to_vao<F: FnMut() -> u32>(self, mut locations: F) {
-        self.binding.bind_to_vao(locations());
+    unsafe fn bind_all_to_vao(self, location: u32) {
+        self.binding.bind_to_vao(location);
     }
 }
 
 unsafe impl InterfaceBinding for () {
     type Bind = ();
 
-    unsafe fn bind_all_to_vao<F: FnMut() -> u32>(self, mut locations: F) {
+    unsafe fn bind_all_to_vao(self, location: u32) {
         // don't do anything
     }
 }
@@ -155,11 +156,204 @@ where
 {
     type Bind = <R::Bind as AttachFront<S>>::AttachFront;
 
-    unsafe fn bind_all_to_vao<F: FnMut() -> u32>(self, mut locations: F) {
+    unsafe fn bind_all_to_vao(self, location: u32) {
         let (front, remaining) = self.remove_front();
-        front.binding.bind_to_vao(locations());
-        remaining.bind_all_to_vao(locations);
+        front.binding.bind_to_vao(location);
+        remaining.bind_all_to_vao(location + S::get_param().num_input_locations);
     }
+}
+
+pub mod uniform {
+    use crate::opengl::shader::{
+        traits::*, Float, Float2, Float3, Float4, Int, Int2, Int3, Int4, UInt, UInt2, UInt3, UInt4,
+    };
+    use crate::opengl::GlWindow;
+    use crate::tuple::{AttachFront, RemoveFront, TupleIndex};
+    use std::marker::PhantomData;
+
+    static mut NUM_UNIFORMS: u64 = 0;
+
+    pub struct Uniforms<T: ShaderArgs> {
+        data: Box<[u32]>,
+        id: u64,
+        phantom: PhantomData<T>,
+    }
+
+    struct UniformFn {
+        index: u32,
+        func: *const std::os::raw::c_void,
+        is_mat: bool,
+    }
+
+    impl<T: ShaderArgs + ShaderArgsClass<UniformArgs>> Uniforms<T> {
+        // note: new_inner must only be called on the main thread.
+        pub(crate) fn new_inner<S: SetUniforms<T>>(uniforms: S) -> Uniforms<T> {
+            let mut i = 0;
+            let mut len = 0;
+            while i < T::NARGS {
+                len += T::get_param(i).num_elements;
+                i += 1;
+            }
+            let mut data = Vec::with_capacity(len as usize);
+            uniforms.push_to_vec(&mut data);
+            let id;
+            // new_innder() will only be called on the thread owning the GlDraw
+            unsafe {
+                id = NUM_UNIFORMS;
+                NUM_UNIFORMS += 1;
+            }
+            Uniforms {
+                data: data.into_boxed_slice(),
+                id: id,
+                phantom: PhantomData,
+            }
+        }
+
+        pub fn new<S: SetUniforms<T>>(_window: &GlWindow, uniforms: S) -> Uniforms<T> {
+            Self::new_inner(uniforms)
+        }
+
+        pub(crate) fn default_inner() -> Uniforms<T> {
+            let mut i = 0;
+            let mut len = 0;
+            while i < T::NARGS {
+                len += T::get_param(i).num_elements;
+                i += 1;
+            }
+            let v = vec![0u32; len as usize];
+            let id;
+            unsafe {
+                id = NUM_UNIFORMS;
+                NUM_UNIFORMS += 1;
+            }
+            Uniforms {
+                data: v.into_boxed_slice(),
+                id: id,
+                phantom: PhantomData,
+            }
+        }
+
+        // Initializes the uniforms to all be 0
+        pub fn default(_window: &GlWindow) -> Uniforms<T> {
+            Self::default_inner()
+        }
+
+        pub fn set_val<S: TupleIndex<T>, U: SetUniform<Arg = S::I>>(&self, u: U) {
+            let mut i = 0;
+            let mut len = 0;
+            while i < S::N {
+                len += T::get_param(i).num_elements;
+                i += 1;
+            }
+        }
+
+        #[inline]
+        pub(crate) unsafe fn set_uniform(&self, n: u32, data_point: usize, location: u32) {
+            let f = T::get_param(n as usize);
+            if f.is_mat {
+                crate::opengl::uniform_functions::call_mat(
+                    location as i32,
+                    f.array_count as i32,
+                    &self.data[data_point..],
+                    std::ptr::read(f.func),
+                );
+            } else {
+                crate::opengl::uniform_functions::call(
+                    location as i32,
+                    f.array_count as i32,
+                    &self.data[data_point..],
+                    std::ptr::read(f.func),
+                );
+            }
+        }
+
+        pub(crate) unsafe fn set_uniforms<F: FnMut() -> u32>(&self, mut locations: F) {
+            let mut n = 0;
+            let mut data_point = 0;
+            while n < T::NARGS as u32 {
+                self.set_uniform(n, data_point, locations());
+                data_point += T::get_param(n as usize).num_elements as usize;
+                n += 1;
+            }
+        }
+    }
+
+    pub unsafe trait SetUniforms<T: ShaderArgs>: Copy {
+        fn push_to_vec(self, vec: &mut Vec<u32>);
+    }
+
+    unsafe impl SetUniforms<()> for () {
+        fn push_to_vec(self, vec: &mut Vec<u32>) {
+            // don't do anything
+        }
+    }
+
+    unsafe impl<
+            T: RemoveFront + Copy,
+            U: ShaderArgs + RemoveFront<Front = <T::Front as SetUniform>::Arg>,
+        > SetUniforms<U> for T
+    where
+        T::Front: SetUniform + ArgParameter<UniformArgs>,
+        T::Remaining: SetUniforms<U::Remaining>,
+        U::Remaining: ShaderArgs,
+    {
+        fn push_to_vec(self, vec: &mut Vec<u32>) {
+            let (front, remaining) = self.remove_front();
+            let l = vec.len();
+            unsafe {
+                let new_len = l + T::Front::get_param().num_elements as usize;
+                assert!(vec.capacity() >= new_len);
+                vec.set_len(new_len);
+            }
+            front.copy_to_slice(&mut vec[l..]);
+            remaining.push_to_vec(vec);
+        }
+    }
+
+    pub unsafe trait SetUniform: Copy {
+        type Arg;
+
+        fn copy_to_slice(&self, vec: &mut [u32]);
+    }
+
+    macro_rules! set_uniform {
+        ($t:ty, $arg:ident) => {
+            unsafe impl SetUniform for $t {
+                type Arg = $arg;
+
+                fn copy_to_slice(&self, slice: &mut [u32]) {
+                    // this is safe because the types used will only be
+                    // f32, i32, and u32
+                    slice[0] = unsafe { std::mem::transmute(*self) };
+                }
+            }
+        };
+        (;$t:ty, $arg:ident) => {
+            unsafe impl SetUniform for $t {
+                type Arg = $arg;
+
+                fn copy_to_slice(&self, slice: &mut [u32]) {
+                    // this is safe because the types used will only be
+                    // f32, i32, and u32
+                    slice.copy_from_slice(unsafe { std::mem::transmute::<_, &[u32]>(&self[..]) });
+                }
+            }
+        };
+    }
+
+    set_uniform!(f32, Float);
+    set_uniform!(;[f32; 2], Float2);
+    set_uniform!(;[f32; 3], Float3);
+    set_uniform!(;[f32; 4], Float4);
+    set_uniform!(u32, UInt);
+    set_uniform!(;[u32; 2], UInt2);
+    set_uniform!(;[u32; 3], UInt3);
+    set_uniform!(;[u32; 4], UInt4);
+    set_uniform!(i32, Int);
+    set_uniform!(;[i32; 2], Int2);
+    set_uniform!(;[i32; 3], Int3);
+    set_uniform!(;[i32; 4], Int4);
+
 }
 
 #[derive(Clone, Copy)]
@@ -292,80 +486,80 @@ impl<'a, T: ArgType + ArgParameter<TransparentArgs>> VecBufferBinding<'a, T> {
 }
 
 impl<T: IntType> VertexBuffer<T> {
-    pub fn int_binding<'a, C: Swizzle4<T::Binding1, T::Binding2, T::Binding3, T::Binding4>>(
+    pub fn int_binding<'a, C: TupleIndex<(T::Binding1, T::Binding2, T::Binding3, T::Binding4)>>(
         &'a self,
         _components: C,
         offset: Option<u32>,
         stride: Option<u32>,
-    ) -> BufferBinding<C::S, VecBufferBinding<'a, C::S>>
+    ) -> BufferBinding<C::I, VecBufferBinding<'a, C::I>>
     where
-        C::S: ArgType + ArgParameter<TransparentArgs>,
+        C::I: ArgType + ArgParameter<TransparentArgs>,
     {
         wrap(VecBufferBinding::new::<T>(
             unsafe { inner_gl_unsafe_static().resource_list[self.buffer.buffer_id as usize] },
             2,
             offset,
             stride,
-            <C as swizzle::SZ>::N,
+            C::N,
             self.buffer.buffer_len,
         ))
     }
 
-    pub fn float_binding<'a, C: Swizzle4<Float, Float2, Float3, Float4>>(
+    pub fn float_binding<'a, C: TupleIndex<(Float, Float2, Float3, Float4)>>(
         &'a self,
         _components: C,
         offset: Option<u32>,
         stride: Option<u32>,
-    ) -> BufferBinding<C::S, VecBufferBinding<'a, C::S>>
+    ) -> BufferBinding<C::I, VecBufferBinding<'a, C::I>>
     where
-        C::S: ArgType + ArgParameter<TransparentArgs>,
+        C::I: ArgType + ArgParameter<TransparentArgs>,
     {
         wrap(VecBufferBinding::new::<T>(
             unsafe { inner_gl_unsafe_static().resource_list[self.buffer.buffer_id as usize] },
             1,
             offset,
             stride,
-            <C as swizzle::SZ>::N,
+            C::N,
             self.buffer.buffer_len,
         ))
     }
 
-    pub fn norm_float_binding<'a, C: Swizzle4<Float, Float2, Float3, Float4>>(
+    pub fn norm_float_binding<'a, C: TupleIndex<(Float, Float2, Float3, Float4)>>(
         &'a self,
         _components: C,
         offset: Option<u32>,
         stride: Option<u32>,
-    ) -> BufferBinding<C::S, VecBufferBinding<'a, C::S>>
+    ) -> BufferBinding<C::I, VecBufferBinding<'a, C::I>>
     where
-        C::S: ArgType + ArgParameter<TransparentArgs>,
+        C::I: ArgType + ArgParameter<TransparentArgs>,
     {
         wrap(VecBufferBinding::new::<T>(
             unsafe { inner_gl_unsafe_static().resource_list[self.buffer.buffer_id as usize] },
             0,
             offset,
             stride,
-            <C as swizzle::SZ>::N,
+            C::N,
             self.buffer.buffer_len,
         ))
     }
 }
 
 impl VertexBuffer<f32> {
-    pub fn binding<'a, C: Swizzle4<Float, Float2, Float3, Float4>>(
+    pub fn binding<'a, C: TupleIndex<(Float, Float2, Float3, Float4)>>(
         &'a self,
         _components: C,
         offset: Option<u32>,
         stride: Option<u32>,
-    ) -> BufferBinding<C::S, VecBufferBinding<'a, C::S>>
+    ) -> BufferBinding<C::I, VecBufferBinding<'a, C::I>>
     where
-        C::S: ArgType + ArgParameter<TransparentArgs>,
+        C::I: ArgType + ArgParameter<TransparentArgs>,
     {
         wrap(VecBufferBinding::new::<f32>(
             unsafe { inner_gl_unsafe_static().resource_list[self.buffer.buffer_id as usize] },
             1,
             offset,
             stride,
-            <C as swizzle::SZ>::N,
+            C::N,
             self.buffer.buffer_len,
         ))
     }
@@ -444,6 +638,10 @@ impl<T: IndexType> ElementBuffer<T> {
     pub fn into_inner(self) -> Buffer {
         self.buffer
     }
+
+    pub fn buffer_ref(&self) -> &Buffer {
+        &self.buffer
+    }
 }
 
 /// A generic buffer that can hold any type of data.
@@ -451,7 +649,7 @@ impl<T: IndexType> ElementBuffer<T> {
 /// Buffers in opengl fundamentally don't care about what type of data is in them (this is
 /// different from textures, which have a specific, implementation defined, type and format).
 pub struct Buffer {
-    buffer_id: u32,
+    pub(crate) buffer_id: u32,
     // the size in bytes of the buffer.
     buffer_len: usize,
     // like all gl resources, a buffer cannot be used on different threads

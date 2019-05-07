@@ -2,10 +2,9 @@
 
 pub mod color;
 pub mod opengl;
-/// The swizzle module contains functions for safely reordering tuples and arrays
-/// with compile time type checking.
+
 #[allow(non_snake_case)]
-pub mod swizzle;
+pub mod tuple;
 
 use nalgebra as na;
 
