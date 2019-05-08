@@ -1,10 +1,11 @@
+use super::gl;
 use super::shader;
 use super::shader::traits::*;
 use super::{inner_gl_unsafe, inner_gl_unsafe_static, GlResource};
 use crate::tuple::TupleIndex;
 use crate::tuple::{AttachFront, RemoveFront};
-use gl;
 use gl::types::*;
+use gl::Gl;
 use shader::{Float, Float2, Float3, Float4, Int, Int2, Int3, Int4, UInt, UInt2, UInt3, UInt4};
 use std::marker::PhantomData;
 
@@ -69,29 +70,34 @@ pub struct VertexBuffer<T: GlDataType> {
 impl<T: GlDataType> VertexBuffer<T> {
     pub fn new(_window: &super::GlWindow, data: &[T]) -> VertexBuffer<T> {
         unsafe {
-            let mut buffer = 0;
-            gl::GenBuffers(1, &mut buffer);
-            gl::BindBuffer(gl::ARRAY_BUFFER, buffer);
-            gl::BufferData(
-                gl::ARRAY_BUFFER,
-                (data.len() * mem::size_of::<T>()) as isize,
-                data.as_ptr() as *const _,
-                gl::STATIC_DRAW,
-            );
-            gl::BindBuffer(gl::ARRAY_BUFFER, 0);
-            let hints = (gl::STATIC_DRAW as usize) << 32 + gl::ARRAY_BUFFER as usize;
+            // note: we could take the gl from the window, but that window is
+            // not necessarily the active window. If some window exists, then there
+            // is an active window
+            gl::with_current(|gl| {
+                let mut buffer = 0;
+                gl.GenBuffers(1, &mut buffer);
+                gl.BindBuffer(gl::ARRAY_BUFFER, buffer);
+                gl.BufferData(
+                    gl::ARRAY_BUFFER,
+                    (data.len() * mem::size_of::<T>()) as isize,
+                    data.as_ptr() as *const _,
+                    gl::STATIC_DRAW,
+                );
+                gl.BindBuffer(gl::ARRAY_BUFFER, 0);
+                let hints = (gl::STATIC_DRAW as usize) << 32 + gl::ARRAY_BUFFER as usize;
 
-            let id =
-                inner_gl_unsafe().get_resource_generic::<Buffer>(buffer, Some(hints as *mut ()));
-            let b = Buffer {
-                buffer_id: id,
-                buffer_len: data.len() * mem::size_of::<T>(),
-                phantom: PhantomData,
-            };
-            VertexBuffer {
-                buffer: b,
-                phantom: PhantomData,
-            }
+                let id = inner_gl_unsafe()
+                    .get_resource_generic::<Buffer>(buffer, Some(hints as *mut ()));
+                let b = Buffer {
+                    buffer_id: id,
+                    buffer_len: data.len() * mem::size_of::<T>(),
+                    phantom: PhantomData,
+                };
+                VertexBuffer {
+                    buffer: b,
+                    phantom: PhantomData,
+                }
+            })
         }
     }
 
@@ -121,7 +127,7 @@ impl<T: GlDataType> VertexBuffer<T> {
 pub unsafe trait InterfaceBinding {
     type Bind: ShaderArgs;
 
-    unsafe fn bind_all_to_vao(self, location: u32);
+    unsafe fn bind_all_to_vao(self, gl: &Gl, location: u32);
 }
 
 unsafe impl<T: ArgType + ArgParameter<TransparentArgs>, B: BindBuffer<T>> InterfaceBinding
@@ -131,15 +137,15 @@ where
 {
     type Bind = (T,);
 
-    unsafe fn bind_all_to_vao(self, location: u32) {
-        self.binding.bind_to_vao(location);
+    unsafe fn bind_all_to_vao(self, gl: &Gl, location: u32) {
+        self.binding.bind_to_vao(gl, location);
     }
 }
 
 unsafe impl InterfaceBinding for () {
     type Bind = ();
 
-    unsafe fn bind_all_to_vao(self, location: u32) {
+    unsafe fn bind_all_to_vao(self, gl: &Gl, location: u32) {
         // don't do anything
     }
 }
@@ -156,14 +162,15 @@ where
 {
     type Bind = <R::Bind as AttachFront<S>>::AttachFront;
 
-    unsafe fn bind_all_to_vao(self, location: u32) {
+    unsafe fn bind_all_to_vao(self, gl: &Gl, location: u32) {
         let (front, remaining) = self.remove_front();
-        front.binding.bind_to_vao(location);
-        remaining.bind_all_to_vao(location + S::get_param().num_input_locations);
+        front.binding.bind_to_vao(gl, location);
+        remaining.bind_all_to_vao(gl, location + S::get_param().num_input_locations);
     }
 }
 
 pub mod uniform {
+    use super::Gl;
     use crate::opengl::shader::{
         traits::*, Float, Float2, Float3, Float4, Int, Int2, Int3, Int4, UInt, UInt2, UInt3, UInt4,
     };
@@ -248,30 +255,31 @@ pub mod uniform {
         }
 
         #[inline]
-        pub(crate) unsafe fn set_uniform(&self, n: u32, data_point: usize, location: u32) {
+        pub(crate) unsafe fn set_uniform(&self, gl: &Gl, n: u32, data_point: usize, location: u32) {
             let f = T::get_param(n as usize);
-            if f.is_mat {
+            unimplemented!();
+            /*if f.is_mat {
                 crate::opengl::uniform_functions::call_mat(
                     location as i32,
                     f.array_count as i32,
                     &self.data[data_point..],
-                    std::ptr::read(f.func),
+                    ,
                 );
             } else {
                 crate::opengl::uniform_functions::call(
                     location as i32,
                     f.array_count as i32,
                     &self.data[data_point..],
-                    std::ptr::read(f.func),
+                    ,
                 );
-            }
+            }*/
         }
 
-        pub(crate) unsafe fn set_uniforms<F: FnMut() -> u32>(&self, mut locations: F) {
+        pub(crate) unsafe fn set_uniforms<F: FnMut() -> u32>(&self, gl: &Gl, mut locations: F) {
             let mut n = 0;
             let mut data_point = 0;
             while n < T::NARGS as u32 {
-                self.set_uniform(n, data_point, locations());
+                self.set_uniform(gl, n, data_point, locations());
                 data_point += T::get_param(n as usize).num_elements as usize;
                 n += 1;
             }
@@ -369,7 +377,7 @@ pub unsafe trait BindBuffer<T: ArgType + ArgParameter<TransparentArgs>> {
     /// This function should not enable that attribute. This function should bind
     /// a buffer to gl::ARRAY_BUFFER, and the caller of this function is responsible
     /// for binding 0 to gl::ARRAY_BUFFER after it is done calling it.
-    unsafe fn bind_to_vao(&self, location: u32);
+    unsafe fn bind_to_vao(&self, gl: &Gl, location: u32);
 }
 
 fn wrap<T: ArgType + ArgParameter<TransparentArgs>, B: BindBuffer<T>>(
@@ -409,10 +417,10 @@ impl<'a, T: ArgType + ArgParameter<TransparentArgs>> Clone for VecBufferBinding<
 unsafe impl<'a, T: ArgType + ArgParameter<TransparentArgs>> BindBuffer<T>
     for VecBufferBinding<'a, T>
 {
-    unsafe fn bind_to_vao(&self, location: u32) {
-        gl::BindBuffer(gl::ARRAY_BUFFER, self.buffer);
+    unsafe fn bind_to_vao(&self, gl: &Gl, location: u32) {
+        gl.BindBuffer(gl::ARRAY_BUFFER, self.buffer);
         if self.int_norm == 2 {
-            gl::VertexAttribIPointer(
+            gl.VertexAttribIPointer(
                 location,
                 self.comps as i32,
                 self.ty,
@@ -425,7 +433,7 @@ unsafe impl<'a, T: ArgType + ArgParameter<TransparentArgs>> BindBuffer<T>
             } else {
                 gl::FALSE
             };
-            gl::VertexAttribPointer(
+            gl.VertexAttribPointer(
                 location,
                 self.comps as i32,
                 self.ty,
@@ -664,16 +672,18 @@ impl GlResource for Buffer {
         let buffer_type_hint = (hints & 0xFF) as u32;
         let buffer_use_hint = (hints >> 32) as u32;
         let mut buffer = 0;
-        gl::GenBuffers(1, &mut buffer);
-        // in theory, implementations might use the target to make optimizations
-        gl::BindBuffer(buffer_type_hint, buffer);
-        gl::BufferData(
-            buffer_type_hint,
-            len as isize,
-            (ptr as *const u64).offset(2) as *const _,
-            buffer_use_hint,
-        );
-        gl::BindBuffer(buffer_type_hint, 0);
+        gl::with_current(|gl| {
+            gl.GenBuffers(1, &mut buffer);
+            // in theory, implementations might use the target to make optimizations
+            gl.BindBuffer(buffer_type_hint, buffer);
+            gl.BufferData(
+                buffer_type_hint,
+                len as isize,
+                (ptr as *const u64).offset(2) as *const _,
+                buffer_use_hint,
+            );
+            gl.BindBuffer(buffer_type_hint, 0);
+        });
 
         inner_gl_unsafe().resource_list[id as usize] = buffer;
 
@@ -700,36 +710,38 @@ impl GlResource for Buffer {
     }
 
     unsafe fn orphan(id: u32, ptr: *mut ()) -> *mut () {
-        let buffer = inner_gl_unsafe_static().resource_list[id as usize];
-        gl::BindBuffer(gl::ARRAY_BUFFER, buffer);
-        let hints = if cfg!(target_pointer_width = "64") {
-            ptr as u64
-        } else if cfg!(target_pointer_width = "32") {
-            let mut h = 0;
-            gl::GetBufferParameteriv(gl::ARRAY_BUFFER, gl::BUFFER_USAGE, &mut h);
-            (h << 32) as u64 + ptr as u64
-        } else {
-            panic!("Supported point widths are 32 and 64 bits.");
-        };
-        let mut len = 0;
-        gl::GetBufferParameteri64v(gl::ARRAY_BUFFER, gl::BUFFER_SIZE, &mut len);
+        gl::with_current(|gl| {
+            let buffer = inner_gl_unsafe_static().resource_list[id as usize];
+            gl.BindBuffer(gl::ARRAY_BUFFER, buffer);
+            let hints = if cfg!(target_pointer_width = "64") {
+                ptr as u64
+            } else if cfg!(target_pointer_width = "32") {
+                let mut h = 0;
+                gl.GetBufferParameteriv(gl::ARRAY_BUFFER, gl::BUFFER_USAGE, &mut h);
+                (h << 32) as u64 + ptr as u64
+            } else {
+                panic!("Supported pointer widths are 32 and 64 bits.");
+            };
+            let mut len = 0;
+            gl.GetBufferParameteri64v(gl::ARRAY_BUFFER, gl::BUFFER_SIZE, &mut len);
 
-        let mut data_vec = Vec::<u8>::with_capacity(len as usize + 8);
-        let ptr = data_vec.as_mut_ptr();
-        mem::forget(data_vec);
+            let mut data_vec = Vec::<u8>::with_capacity(len as usize + 8);
+            let ptr = data_vec.as_mut_ptr();
+            mem::forget(data_vec);
 
-        ptr::write_unaligned(ptr as *mut u64, len as u64);
-        ptr::write_unaligned((ptr as *mut u64).offset(1), hints);
+            ptr::write_unaligned(ptr as *mut u64, len as u64);
+            ptr::write_unaligned((ptr as *mut u64).offset(1), hints);
 
-        gl::GetBufferSubData(
-            gl::ARRAY_BUFFER,
-            0,
-            len as isize,
-            (ptr as *mut u64).offset(2) as *mut _,
-        );
-        gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+            gl.GetBufferSubData(
+                gl::ARRAY_BUFFER,
+                0,
+                len as isize,
+                (ptr as *mut u64).offset(2) as *mut _,
+            );
+            gl.BindBuffer(gl::ARRAY_BUFFER, 0);
 
-        ptr as *mut ()
+            ptr as *mut ()
+        })
     }
 }
 

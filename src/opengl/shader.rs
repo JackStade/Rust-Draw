@@ -577,9 +577,11 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs> 
         let gl_draw = super::inner_gl_unsafe();
         let [data_len, format, drop_len] = ptr::read(ptr as *const [u32; 3]);
         let ptr = ptr as *mut u32;
-        let program = gl::CreateProgram();
-        gl::ProgramBinary(program, format, ptr.offset(3) as *const _, data_len as i32);
-        gl_draw.resource_list[id as usize] = program;
+        gl::with_current(|gl| {
+            let program = gl.CreateProgram();
+            gl.ProgramBinary(program, format, ptr.offset(3) as *const _, data_len as i32);
+            gl_draw.resource_list[id as usize] = program;
+        });
         let _drop_vec = Vec::from_raw_parts(ptr, drop_len as usize, drop_len as usize);
         // drop the data
         None
@@ -597,29 +599,31 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs> 
     }
 
     unsafe fn orphan(id: u32, _ptr: *mut ()) -> *mut () {
-        let gl_draw = super::inner_gl_unsafe();
-        let program = gl_draw.resource_list[id as usize];
-        let mut len = 0;
-        let mut format = 0;
-        gl::GetProgramiv(program, gl::PROGRAM_BINARY_LENGTH, &mut len);
-        // adding 3 to len rounds up if the binary length is not a multiple
-        // of 4
-        let mut buffer = Vec::<u32>::with_capacity(3 + (len as usize + 3) >> 2);
-        let cap = buffer.capacity();
-        let mut data_len = 0;
-        let ptr = buffer.as_mut_ptr();
-        std::mem::forget(buffer);
-        gl::GetProgramBinary(
-            program,
-            len,
-            &mut data_len,
-            &mut format,
-            ptr.offset(3) as *mut _,
-        );
-        ptr.write(data_len as u32);
-        ptr.offset(1).write(format);
-        ptr.offset(2).write(cap as u32);
-        ptr as *mut ()
+        gl::with_current(|gl| {
+            let gl_draw = super::inner_gl_unsafe();
+            let program = gl_draw.resource_list[id as usize];
+            let mut len = 0;
+            let mut format = 0;
+            gl.GetProgramiv(program, gl::PROGRAM_BINARY_LENGTH, &mut len);
+            // adding 3 to len rounds up if the binary length is not a multiple
+            // of 4
+            let mut buffer = Vec::<u32>::with_capacity(3 + (len as usize + 3) >> 2);
+            let cap = buffer.capacity();
+            let mut data_len = 0;
+            let ptr = buffer.as_mut_ptr();
+            std::mem::forget(buffer);
+            gl.GetProgramBinary(
+                program,
+                len,
+                &mut data_len,
+                &mut format,
+                ptr.offset(3) as *mut _,
+            );
+            ptr.write(data_len as u32);
+            ptr.offset(1).write(format);
+            ptr.offset(2).write(cap as u32);
+            ptr as *mut ()
+        })
     }
 }
 
@@ -741,32 +745,32 @@ where
     .unwrap();
     let _ = Rc::try_unwrap(f_scope).expect("A value was moved out of the fragment shader generator and stored elsewhere. This is not allowed because it could cause generation of an invalid shader.");
     let program = get_program(v_string.as_bytes_with_nul(), f_string.as_bytes_with_nul());
-    if cfg!(feature = "opengl41") {
-        unsafe {
-            gl::ProgramParameteri(
-                program,
-                gl::PROGRAM_BINARY_RETRIEVABLE_HINT,
-                gl::TRUE as i32,
-            );
-        }
-    }
     let mut uniform_locations = vec![0; Uniforms::NARGS];
-    for i in 0..Uniforms::NARGS {
-        unsafe {
-            uniform_locations[i] = gl::GetUniformLocation(
-                program,
-                CString::new(format!("u{}", i)).unwrap().as_ptr() as *const _,
-            );
-        }
-    }
     let mut image_locations = vec![0; Images::NARGS];
-    for i in 0..Images::NARGS {
-        unsafe {
-            image_locations[i] = gl::GetUniformLocation(
-                program,
-                CString::new(format!("tex{}", i)).unwrap().as_ptr() as *const _,
-            );
-        }
+    unsafe {
+        gl::with_current(|gl| {
+            if cfg!(feature = "opengl41") {
+                gl.ProgramParameteri(
+                    program,
+                    gl::PROGRAM_BINARY_RETRIEVABLE_HINT,
+                    gl::TRUE as i32,
+                );
+            }
+
+            for i in 0..Uniforms::NARGS {
+                uniform_locations[i] = gl.GetUniformLocation(
+                    program,
+                    CString::new(format!("u{}", i)).unwrap().as_ptr() as *const _,
+                );
+            }
+
+            for i in 0..Images::NARGS {
+                image_locations[i] = gl.GetUniformLocation(
+                    program,
+                    CString::new(format!("tex{}", i)).unwrap().as_ptr() as *const _,
+                );
+            }
+        });
     }
     ShaderProgram::new(
         program,
@@ -917,82 +921,84 @@ where
 
 pub(super) fn get_program(vertex_source: &[u8], fragment_source: &[u8]) -> GLuint {
     unsafe {
-        let vertex_shader = gl::CreateShader(gl::VERTEX_SHADER);
-        gl::ShaderSource(
-            vertex_shader,
-            1,
-            &(vertex_source.as_ptr() as *const i8),
-            &((&vertex_source).len() as i32),
-        );
-        gl::CompileShader(vertex_shader);
-
-        // check for shader compile errors
-        let mut success = gl::FALSE as GLint;
-        let mut info_log = Vec::with_capacity(512);
-        let mut log_len = 0;
-        gl::GetShaderiv(vertex_shader, gl::COMPILE_STATUS, &mut success);
-        if success != gl::TRUE as GLint {
-            gl::GetShaderInfoLog(
+        gl::with_current(|gl| {
+            let vertex_shader = gl.CreateShader(gl::VERTEX_SHADER);
+            gl.ShaderSource(
                 vertex_shader,
-                512,
-                &mut log_len,
-                info_log.as_mut_ptr() as *mut GLchar,
+                1,
+                &(vertex_source.as_ptr() as *const i8),
+                &((&vertex_source).len() as i32),
             );
-            info_log.set_len(log_len as usize);
-            println!(
-                "Vertex shader compilation failed.\n{}",
-                str::from_utf8(&info_log).unwrap()
-            );
-        }
+            gl.CompileShader(vertex_shader);
 
-        // fragment shader
-        let fragment_shader = gl::CreateShader(gl::FRAGMENT_SHADER);
-        gl::ShaderSource(
-            fragment_shader,
-            1,
-            &(fragment_source.as_ptr() as *const i8),
-            &((&fragment_source).len() as i32),
-        );
-        gl::CompileShader(fragment_shader);
-        // check for shader compile errors
-        gl::GetShaderiv(fragment_shader, gl::COMPILE_STATUS, &mut success);
-        if success != gl::TRUE as GLint {
-            gl::GetShaderInfoLog(
+            // check for shader compile errors
+            let mut success = gl::FALSE as GLint;
+            let mut info_log = Vec::with_capacity(512);
+            let mut log_len = 0;
+            gl.GetShaderiv(vertex_shader, gl::COMPILE_STATUS, &mut success);
+            if success != gl::TRUE as GLint {
+                gl.GetShaderInfoLog(
+                    vertex_shader,
+                    512,
+                    &mut log_len,
+                    info_log.as_mut_ptr() as *mut GLchar,
+                );
+                info_log.set_len(log_len as usize);
+                println!(
+                    "Vertex shader compilation failed.\n{}",
+                    str::from_utf8(&info_log).unwrap()
+                );
+            }
+
+            // fragment shader
+            let fragment_shader = gl.CreateShader(gl::FRAGMENT_SHADER);
+            gl.ShaderSource(
                 fragment_shader,
-                512,
-                &mut log_len,
-                info_log.as_mut_ptr() as *mut GLchar,
+                1,
+                &(fragment_source.as_ptr() as *const i8),
+                &((&fragment_source).len() as i32),
             );
-            info_log.set_len(log_len as usize);
-            println!(
-                "Fragment shader compilation failed.\n{}",
-                str::from_utf8(&info_log).unwrap()
-            );
-        }
+            gl.CompileShader(fragment_shader);
+            // check for shader compile errors
+            gl.GetShaderiv(fragment_shader, gl::COMPILE_STATUS, &mut success);
+            if success != gl::TRUE as GLint {
+                gl.GetShaderInfoLog(
+                    fragment_shader,
+                    512,
+                    &mut log_len,
+                    info_log.as_mut_ptr() as *mut GLchar,
+                );
+                info_log.set_len(log_len as usize);
+                println!(
+                    "Fragment shader compilation failed.\n{}",
+                    str::from_utf8(&info_log).unwrap()
+                );
+            }
 
-        // link shaders
-        let shader_program = gl::CreateProgram();
-        gl::AttachShader(shader_program, vertex_shader);
-        gl::AttachShader(shader_program, fragment_shader);
-        gl::LinkProgram(shader_program);
-        // check for linking errors
-        gl::GetProgramiv(shader_program, gl::LINK_STATUS, &mut success);
-        if success != gl::TRUE as GLint {
-            gl::GetProgramInfoLog(
-                shader_program,
-                512,
-                &mut log_len,
-                info_log.as_mut_ptr() as *mut GLchar,
-            );
-            info_log.set_len(log_len as usize);
-            println!(
-                "Program linking failed.\n{}",
-                str::from_utf8(&info_log).unwrap()
-            );
-        }
-        gl::DeleteShader(vertex_shader);
-        gl::DeleteShader(fragment_shader);
-        shader_program
+            // link shaders
+            let shader_program = gl.CreateProgram();
+            gl.AttachShader(shader_program, vertex_shader);
+            gl.AttachShader(shader_program, fragment_shader);
+            gl.LinkProgram(shader_program);
+            // check for linking errors
+            gl.GetProgramiv(shader_program, gl::LINK_STATUS, &mut success);
+            if success != gl::TRUE as GLint {
+                gl.GetProgramInfoLog(
+                    shader_program,
+                    512,
+                    &mut log_len,
+                    info_log.as_mut_ptr() as *mut GLchar,
+                );
+                info_log.set_len(log_len as usize);
+                println!(
+                    "Program linking failed.\n{}",
+                    str::from_utf8(&info_log).unwrap()
+                );
+            }
+            gl.DeleteShader(vertex_shader);
+            gl.DeleteShader(fragment_shader);
+            shader_program
+        })
     }
 }
 
@@ -1114,6 +1120,7 @@ pub mod api {
 
 #[allow(unused, unused_parens)]
 pub mod traits {
+    use super::gl;
     use super::swizzle::SwizzleMask;
     use super::{DataType, ItemRef, ShaderArgDataList, ShaderArgList, VarExpr, VarString};
     use std::ops::{Add, Div, Mul, Neg, Sub};
@@ -1587,10 +1594,7 @@ pub mod traits {
         pub num_elements: u32,
         pub array_count: u32,
         pub is_mat: bool,
-        // note: two layers of indirection are needed for a couple of reasons
-        // first, the function pointers are re-loaded when the context is reset
-        // second, this will allow get_param to be a constant function in the future
-        pub func: *const *const std::os::raw::c_void,
+        pub func: usize,
     }
 
     unsafe impl ArgClass for UniformArgs {}

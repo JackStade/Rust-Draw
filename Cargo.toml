@@ -4,13 +4,16 @@ version = "0.1.0"
 authors = ["Jack Stade <jack.stade@gmail.com>"]
 edition = '2018'
 publis = false
+build = "build.rs"
 description = "This is a drawing/graphics library for Rust that is intended to be similar in concept to the Processing library for java. The goal is to allow drawing images and polygons with very few lines of code, but to also support more advanced rendering techniques. This library uses opengl as a backend."
 license = "Mit OR Apache"
 
 [dependencies]
-gl = "0.6.2"
 image = "0.21.0"
 nalgebra = "0.17.0"
+
+[build-dependencies]
+gl_generator = "0.5.0"
 
 [dependencies.glfw]
 version = "0.21.0"

@@ -1,4 +1,3 @@
-extern crate gl;
 extern crate glfw;
 
 use nalgebra as na;
@@ -17,8 +16,9 @@ use std::thread;
 use crate::color;
 use crate::CoordinateSpace;
 
-use self::gl::types::*;
 use self::glfw::ffi as glfw_raw;
+use gl::types::*;
+use gl::Gl;
 
 /// The shader module contains lower level functions for creating and using shaders.
 /// This is an advanced feature that can be difficult to use correctly.
@@ -170,8 +170,9 @@ struct GlDrawCore {
 const NUM_DRAW_BUFFERS: i32 = 3;
 
 mod free_draw {
+    use super::gl::types::*;
     use super::NUM_DRAW_BUFFERS;
-    use gl::types::*;
+
     pub static mut DRAW_BUFFERS: [GLuint; NUM_DRAW_BUFFERS as usize] =
         [0; NUM_DRAW_BUFFERS as usize];
     pub static mut COLOR_SHADER: GLuint = 0;
@@ -182,102 +183,20 @@ mod free_draw {
     pub static mut TEX_SHADER_TRANSFORM: GLint = 0;
 }
 
+pub mod gl {
+    use super::GlWindow;
 
-#[allow(non_upper_case_globals)]
-mod uniform_functions {
-    use super::glfw_raw;
-    use std::ffi::CString;
+    pub(super) static mut CURRENT: *const Gl = 0 as *const Gl;
 
-    macro_rules! load_fns {
-        ($($f:ident,)*) => (
-            $(
-                let cs = CString::new(stringify!($f)).unwrap();
-                $f = glfw_raw::glfwGetProcAddress(cs.as_ptr()) as *const _;
-            )*
-        );
+    pub unsafe fn with_current<O, F: FnOnce(&Gl) -> O>(f: F) -> O {
+        unsafe { f(&*CURRENT) }
     }
 
-    pub unsafe fn load() {
-        load_fns!(
-            Uniform1fv,
-            Uniform2fv,
-            Uniform3fv,
-            Uniform4fv,
-            Uniform1iv,
-            Uniform2iv,
-            Uniform3iv,
-            Uniform4iv,
-            Uniform1uiv,
-            Uniform2uiv,
-            Uniform3uiv,
-            Uniform4uiv,
-            UniformMatrix2fv,
-            UniformMatrix2x3fv,
-            UniformMatrix2x4fv,
-            UniformMatrix3x2fv,
-            UniformMatrix3fv,
-            UniformMatrix3x4fv,
-            UniformMatrix4x2fv,
-            UniformMatrix4x3fv,
-            UniformMatrix4fv,
-        );
+    pub unsafe fn get_gl<'a>(window: &'a GlWindow) -> &'a Gl {
+        &window.gl
     }
 
-    #[inline(always)]
-    pub unsafe fn call(location: i32, count: i32, data: &[u32], f: *const std::os::raw::c_void) {
-        (std::mem::transmute::<_, extern "system" fn(i32, i32, *const u32)>(f))(
-            location,
-            count,
-            data.as_ptr(),
-        );
-    }
-
-    #[inline(always)]
-    pub unsafe fn call_mat(
-        location: i32,
-        count: i32,
-        data: &[u32],
-        f: *const std::os::raw::c_void,
-    ) {
-        (std::mem::transmute::<_, extern "system" fn(i32, i32, u8, *const u32)>(f))(
-            location,
-            count,
-            gl::FALSE,
-            data.as_ptr(),
-        );
-    }
-
-    macro_rules! uniform_fn {
-        ($($f:ident,)*) => (
-            $(
-                pub static mut $f: *const std::os::raw::c_void = 0 as *const _;
-            )*
-        )
-    }
-
-    uniform_fn!(
-        Uniform1fv,
-        Uniform2fv,
-        Uniform3fv,
-        Uniform4fv,
-        Uniform1iv,
-        Uniform2iv,
-        Uniform3iv,
-        Uniform4iv,
-        Uniform1uiv,
-        Uniform2uiv,
-        Uniform3uiv,
-        Uniform4uiv,
-        UniformMatrix2fv,
-        UniformMatrix2x3fv,
-        UniformMatrix2x4fv,
-        UniformMatrix3x2fv,
-        UniformMatrix3fv,
-        UniformMatrix3x4fv,
-        UniformMatrix4x2fv,
-        UniformMatrix4x3fv,
-        UniformMatrix4fv,
-    );
+    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
 impl GlDrawCore {
@@ -475,29 +394,35 @@ impl GlDraw {
 
         let init_gl = unsafe { DRAW_INIT };
 
+        let gl;
+
+        unsafe {
+            // we really don't want a struct with hundreds of function pointers
+            // to be sitting around on the stack
+            gl = Box::new(gl::Gl::load_with(|symbol| {
+                let c_str = CString::new(symbol.as_bytes());
+                glfw_raw::glfwGetProcAddress(
+                    c_str.unwrap().as_ptr()
+                ) as *const _
+            }));
+        }
+
+        unsafe {
+            gl::CURRENT = &*gl as *const _;
+        }
+
         if !init_gl {
             // load all OpenGL function pointers. This can only be done if there is a current
             // active context
-            unsafe {
-                gl::load_with(|symbol| {
-                    let c_str = CString::new(symbol.as_bytes());
-                    glfw_raw::glfwGetProcAddress(
-                        c_str.unwrap().as_bytes_with_nul().as_ptr() as *const i8
-                    ) as *const _
-                });
-                // load the function pointers to uniform fns
-                uniform_functions::load();
-            }
 
             // this cannot be done until a context is linked
             let mut buffers = [0; NUM_DRAW_BUFFERS as usize];
             unsafe {
-                gl::GenBuffers(NUM_DRAW_BUFFERS, (&mut buffers).as_mut_ptr());
-                gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
+                gl.GenBuffers(NUM_DRAW_BUFFERS, (&mut buffers).as_mut_ptr());
+                gl.PixelStorei(gl::UNPACK_ALIGNMENT, 1);
 
                 free_draw::DRAW_BUFFERS = buffers;
             }
-
             let color_shader = shader::get_program(
                 shader::COLOR_VERTEX_SHADER_SOURCE,
                 shader::COLOR_FRAGMENT_SHADER_SOURCE,
@@ -506,15 +431,16 @@ impl GlDraw {
                 shader::TEX_VERTEX_SHADER_SOURCE,
                 shader::TEX_FRAGMENT_SHADER_SOURCE,
             );
+
             unsafe {
                 let color_location =
-                    gl::GetUniformLocation(color_shader, b"color\0".as_ptr() as *const _);
+                    gl.GetUniformLocation(color_shader, b"color\0".as_ptr() as *const _);
                 let color_transform_location =
-                    gl::GetUniformLocation(color_shader, b"transform\0".as_ptr() as *const _);
+                    gl.GetUniformLocation(color_shader, b"transform\0".as_ptr() as *const _);
                 let tex_transform_location =
-                    gl::GetUniformLocation(tex_shader, b"transform\0".as_ptr() as *const _);
+                    gl.GetUniformLocation(tex_shader, b"transform\0".as_ptr() as *const _);
                 let tex_sampler_location =
-                    gl::GetUniformLocation(tex_shader, b"sampler\0".as_ptr() as *const _);
+                    gl.GetUniformLocation(tex_shader, b"sampler\0".as_ptr() as *const _);
 
                 free_draw::COLOR_SHADER_COLOR = color_location;
                 free_draw::COLOR_SHADER_TRANSFORM = color_transform_location;
@@ -547,7 +473,7 @@ impl GlDraw {
 
         let mut vao = 0;
         unsafe {
-            gl::GenVertexArrays(1, &mut vao);
+            gl.GenVertexArrays(1, &mut vao);
         }
         window_data.total_windows += 1;
         window_data.num_windows += 1;
@@ -555,6 +481,7 @@ impl GlDraw {
             width: Cell::new(width as i32),
             height: Cell::new(height as i32),
             scale: Cell::new(pixels_width / width as i32),
+            gl: gl,
             ptr: window_ptr,
             draw_vao: vao,
             phantom: PhantomData,
@@ -575,7 +502,7 @@ impl GlDraw {
             window.scale.set(scale / width);
         }
 
-        let error = unsafe { gl::GetError() };
+        let error = unsafe { window.gl.GetError() };
 
         match error {
             gl::INVALID_ENUM => println!("OpenGL - Invalid Enum"),
@@ -616,6 +543,7 @@ pub struct GlWindow {
     height: Cell<i32>,
     scale: Cell<i32>,
     draw_vao: GLuint,
+    gl: Box<Gl>,
     ptr: *mut glfw_raw::GLFWwindow,
     // rc::Rc is a non-send non-sync type
     phantom: PhantomData<std::rc::Rc<()>>,
@@ -624,11 +552,12 @@ pub struct GlWindow {
 impl GlWindow {
     pub fn background<C: color::Color>(&self, color: C) {
         let c = color.as_rgba();
+        let gl = &self.gl;
         unsafe {
             let old_context = glfw_raw::glfwGetCurrentContext();
             glfw_raw::glfwMakeContextCurrent(self.ptr);
-            gl::ClearColor(c[0], c[1], c[2], c[3]);
-            gl::Clear(gl::COLOR_BUFFER_BIT);
+            gl.ClearColor(c[0], c[1], c[2], c[3]);
+            gl.Clear(gl::COLOR_BUFFER_BIT);
             glfw_raw::glfwMakeContextCurrent(old_context);
         }
     }
@@ -741,17 +670,17 @@ pub mod draw {
     }
 
     impl<'a> DrawTypeEnum<'a> {
-        unsafe fn draw(self, mode: GLenum) {
+        unsafe fn draw(self, gl: &Gl, mode: GLenum) {
             match self {
                 Arrays(start, count) => {
-                    gl::DrawArrays(mode, start as i32, count as i32);
+                    gl.DrawArrays(mode, start as i32, count as i32);
                 }
                 Elements(buffer, ty, count) => {
-                    gl::BindBuffer(
+                    gl.BindBuffer(
                         gl::ELEMENT_ARRAY_BUFFER,
                         super::inner_gl_unsafe_static().resource_list[buffer.buffer_id as usize],
                     );
-                    gl::DrawElements(mode, count as i32, ty, ptr::null());
+                    gl.DrawElements(mode, count as i32, ty, ptr::null());
                 }
                 _ => {
                     unimplemented!();
@@ -780,29 +709,30 @@ pub mod draw {
         mode: DrawMode,
         // target: Target,
     ) {
+        let gl = &window.gl;
         let gl_draw = super::inner_gl_unsafe_static();
         // activate_window(window);
-        gl::UseProgram(gl_draw.resource_list[shader.program_id as usize]);
+        gl.UseProgram(gl_draw.resource_list[shader.program_id as usize]);
         let vao = window.draw_vao;
 
-        gl::BindVertexArray(vao);
+        gl.BindVertexArray(vao);
 
-        in_data.bind_all_to_vao(0);
+        in_data.bind_all_to_vao(gl, 0);
 
         // target.bind_target();
 
         let mut slice = &shader.uniform_locations[..];
-        uniform_data.set_uniforms(|| {
+        uniform_data.set_uniforms(gl, || {
             let s = slice[0];
             slice = &slice[1..];
             s as u32
         });
 
-        draw_type.ty.draw(mode.get_mode());
+        draw_type.ty.draw(&gl, mode.get_mode());
 
-        gl::BindVertexArray(0);
+        gl.BindVertexArray(0);
 
-        gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+        gl.BindFramebuffer(gl::FRAMEBUFFER, 0);
     }
 
 }
@@ -829,15 +759,16 @@ impl<'a> DrawingSurface<'a> {
             self.window.scale.get(),
         ));
         unsafe {
-            gl::Viewport(0, 0, width, height);
+            self.window.gl.Viewport(0, 0, width, height);
         }
     }
 
     pub fn background<C: color::Color>(&self, color: C) {
         let c = color.as_rgba();
+        let gl = &self.window.gl;
         unsafe {
-            gl::ClearColor(c[0], c[1], c[2], c[3]);
-            gl::Clear(gl::COLOR_BUFFER_BIT);
+            gl.ClearColor(c[0], c[1], c[2], c[3]);
+            gl.Clear(gl::COLOR_BUFFER_BIT);
         }
     }
 
@@ -875,6 +806,7 @@ impl<'a> DrawingSurface<'a> {
         start: (f32, f32),
         end: (f32, f32),
     ) {
+        let gl = &self.window.gl;
         let shader = unsafe { free_draw::TEX_SHADER };
 
         let verts = [
@@ -894,81 +826,82 @@ impl<'a> DrawingSurface<'a> {
         let elements: [u8; 6] = [0, 1, 2, 2, 3, 0];
 
         unsafe {
-            gl::UseProgram(shader);
-            gl::UniformMatrix4fv(
+            gl.UseProgram(shader);
+            gl.UniformMatrix4fv(
                 free_draw::TEX_SHADER_TRANSFORM,
                 1,
                 gl::FALSE,
                 self.transform.as_ptr() as *const _,
             );
 
-            gl::Uniform1i(free_draw::TEX_SHADER_TEX, 0);
+            gl.Uniform1i(free_draw::TEX_SHADER_TEX, 0);
 
-            gl::ActiveTexture(gl::TEXTURE0);
-            image.bind();
+            gl.ActiveTexture(gl::TEXTURE0);
+            image.bind(gl);
 
-            gl::BindVertexArray(self.window.draw_vao);
+            gl.BindVertexArray(self.window.draw_vao);
 
-            gl::BindBuffer(gl::ARRAY_BUFFER, free_draw::DRAW_BUFFERS[0]);
-            gl::BufferData(
+            gl.BindBuffer(gl::ARRAY_BUFFER, free_draw::DRAW_BUFFERS[0]);
+            gl.BufferData(
                 gl::ARRAY_BUFFER,
                 4 * 3 * 4,
                 verts.as_ptr() as *const _,
                 gl::STREAM_DRAW,
             );
-            gl::VertexAttribPointer(0, 3, gl::FLOAT, gl::FALSE, 0, ptr::null());
-            gl::EnableVertexAttribArray(0);
+            gl.VertexAttribPointer(0, 3, gl::FLOAT, gl::FALSE, 0, ptr::null());
+            gl.EnableVertexAttribArray(0);
 
-            gl::BindBuffer(gl::ARRAY_BUFFER, free_draw::DRAW_BUFFERS[1]);
-            gl::BufferData(
+            gl.BindBuffer(gl::ARRAY_BUFFER, free_draw::DRAW_BUFFERS[1]);
+            gl.BufferData(
                 gl::ARRAY_BUFFER,
                 4 * 2 * 4,
                 uv.as_ptr() as *const _,
                 gl::STREAM_DRAW,
             );
-            gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, 0, ptr::null());
-            gl::EnableVertexAttribArray(1);
+            gl.VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, 0, ptr::null());
+            gl.EnableVertexAttribArray(1);
 
-            gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, free_draw::DRAW_BUFFERS[2]);
-            gl::BufferData(
+            gl.BindBuffer(gl::ELEMENT_ARRAY_BUFFER, free_draw::DRAW_BUFFERS[2]);
+            gl.BufferData(
                 gl::ELEMENT_ARRAY_BUFFER,
                 1 * 6,
                 elements.as_ptr() as *const _,
                 gl::STREAM_DRAW,
             );
 
-            gl::DrawElements(gl::TRIANGLES, 6, gl::UNSIGNED_BYTE, ptr::null());
+            gl.DrawElements(gl::TRIANGLES, 6, gl::UNSIGNED_BYTE, ptr::null());
         }
     }
 
     pub fn draw_triangle(&self, tri: [f32; 9], color: &color::Color) {
+        let gl = &self.window.gl;
         unsafe {
             let shader = free_draw::COLOR_SHADER;
-            gl::UseProgram(shader);
-            gl::Uniform4fv(
+            gl.UseProgram(shader);
+            gl.Uniform4fv(
                 free_draw::COLOR_SHADER_TRANSFORM,
                 1,
                 color.as_rgba().as_ptr() as *const _,
             );
-            gl::UniformMatrix4fv(
+            gl.UniformMatrix4fv(
                 free_draw::COLOR_SHADER_TRANSFORM,
                 1,
                 gl::FALSE,
                 self.transform.as_ptr() as *const _,
             );
 
-            gl::BindVertexArray(self.window.draw_vao);
-            gl::BindBuffer(gl::ARRAY_BUFFER, free_draw::DRAW_BUFFERS[0]);
-            gl::BufferData(
+            gl.BindVertexArray(self.window.draw_vao);
+            gl.BindBuffer(gl::ARRAY_BUFFER, free_draw::DRAW_BUFFERS[0]);
+            gl.BufferData(
                 gl::ARRAY_BUFFER,
                 4 * 9,
                 tri.as_ptr() as *const _,
                 gl::STREAM_DRAW,
             );
-            gl::VertexAttribPointer(0, 3, gl::FLOAT, gl::FALSE, 0, ptr::null());
-            gl::EnableVertexAttribArray(0);
+            gl.VertexAttribPointer(0, 3, gl::FLOAT, gl::FALSE, 0, ptr::null());
+            gl.EnableVertexAttribArray(0);
 
-            gl::DrawArrays(gl::TRIANGLES, 0, 3);
+            gl.DrawArrays(gl::TRIANGLES, 0, 3);
         }
     }
 }

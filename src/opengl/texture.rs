@@ -1,7 +1,8 @@
+use super::gl;
 use super::shader::traits::GlDataType;
 use super::{inner_gl, inner_gl_unsafe, inner_gl_unsafe_static, GlDraw, GlDrawCore};
-use gl;
 use gl::types::*;
+use gl::Gl;
 use std::marker::PhantomData;
 use std::{mem, ptr};
 
@@ -148,7 +149,7 @@ pub struct DepthStencil24_8 {
 }
 
 pub unsafe trait BindTexture<T> {
-    unsafe fn bind(&self);
+    unsafe fn bind(&self, gl: &Gl);
 }
 
 use super::GlResource;
@@ -176,15 +177,18 @@ impl<F: TextureFormat> GlResource for Texture2D<F> {
         let ptr = ptr as *mut u32;
         let [width, height, drop_len] = ptr::read(ptr as *const [u32; 3]);
         let mut tex = 0;
-        gl::GenTextures(1, &mut tex);
-        Texture2D::<F>::load_image(
-            inner_gl_unsafe(),
-            tex,
-            width,
-            height,
-            ptr.offset(3) as *const _,
-            4,
-        );
+        gl::with_current(|gl| {
+            gl.GenTextures(1, &mut tex);
+            Texture2D::<F>::load_image(
+                inner_gl_unsafe(),
+                gl,
+                tex,
+                width,
+                height,
+                ptr.offset(3) as *const _,
+                4,
+            );
+        });
         // ptr is of type *const u32, and drop_len is the number of u32s to drop
         let _drop_vec = Vec::from_raw_parts(ptr, drop_len as usize, drop_len as usize);
         let gl_draw = inner_gl_unsafe();
@@ -206,49 +210,51 @@ impl<F: TextureFormat> GlResource for Texture2D<F> {
     }
 
     unsafe fn orphan(id: u32, _ptr: *mut ()) -> *mut () {
-        let data_size = mem::size_of::<F::Data>();
-        let num_comps = F::Components::COMPONENTS;
-        let mut w = 0u32;
-        let mut h = 0u32;
-        let tex = inner_gl_unsafe().resource_list[id as usize];
+        gl::with_current(|gl| {
+            let data_size = mem::size_of::<F::Data>();
+            let num_comps = F::Components::COMPONENTS;
+            let mut w = 0u32;
+            let mut h = 0u32;
+            let tex = inner_gl_unsafe().resource_list[id as usize];
 
-        gl::BindTexture(gl::TEXTURE_2D, tex);
-        gl::GetTexLevelParameteriv(
-            gl::TEXTURE_2D,
-            0,
-            gl::TEXTURE_WIDTH,
-            &mut w as *mut _ as *mut _,
-        );
-        gl::GetTexLevelParameteriv(
-            gl::TEXTURE_2D,
-            0,
-            gl::TEXTURE_WIDTH,
-            &mut h as *mut _ as *mut _,
-        );
-        // we need to determine the size of each row (in bytes) so that the buffer has room for padding bytes
-        let row_size = data_size as u32 * num_comps * w;
-        // adding 3 will round the size up if it is not already a multiple of 4
-        let buffer_row_size = (row_size + 3) >> 2;
-        let mut buff = Vec::<u32>::with_capacity(3 + buffer_row_size as usize * h as usize);
-        // cannot push here because rust could in theory reallocate
-        buff.set_len(3);
-        buff[0] = 0;
-        buff[1] = h;
-        buff[2] = buff.capacity() as u32;
-        // into_orphan_data will only be called on the main thread with a context loaded
-        gl::PixelStorei(gl::PACK_ALIGNMENT, 4);
-        gl::GetTexImage(
-            gl::TEXTURE_2D,
-            0,
-            F::Components::FORMAT,
-            F::Data::TYPE,
-            // the first 3 bytes are used for other data
-            buff.as_mut_ptr().offset(3) as *mut _,
-        );
-        let ptr = buff.as_mut_ptr() as *mut ();
-        // can't drop the vec
-        mem::forget(buff);
-        ptr
+            gl.BindTexture(gl::TEXTURE_2D, tex);
+            gl.GetTexLevelParameteriv(
+                gl::TEXTURE_2D,
+                0,
+                gl::TEXTURE_WIDTH,
+                &mut w as *mut _ as *mut _,
+            );
+            gl.GetTexLevelParameteriv(
+                gl::TEXTURE_2D,
+                0,
+                gl::TEXTURE_WIDTH,
+                &mut h as *mut _ as *mut _,
+            );
+            // we need to determine the size of each row (in bytes) so that the buffer has room for padding bytes
+            let row_size = data_size as u32 * num_comps * w;
+            // adding 3 will round the size up if it is not already a multiple of 4
+            let buffer_row_size = (row_size + 3) >> 2;
+            let mut buff = Vec::<u32>::with_capacity(3 + buffer_row_size as usize * h as usize);
+            // cannot push here because rust could in theory reallocate
+            buff.set_len(3);
+            buff[0] = 0;
+            buff[1] = h;
+            buff[2] = buff.capacity() as u32;
+            // into_orphan_data will only be called on the main thread with a context loaded
+            gl.PixelStorei(gl::PACK_ALIGNMENT, 4);
+            gl.GetTexImage(
+                gl::TEXTURE_2D,
+                0,
+                F::Components::FORMAT,
+                F::Data::TYPE,
+                // the first 3 bytes are used for other data
+                buff.as_mut_ptr().offset(3) as *mut _,
+            );
+            let ptr = buff.as_mut_ptr() as *mut ();
+            // can't drop the vec
+            mem::forget(buff);
+            ptr
+        })
     }
 }
 
@@ -267,19 +273,22 @@ impl<F: TextureFormat> Texture2D<F> {
         let id;
         let mut tex = 0;
         unsafe {
-            gl::GenTextures(1, &mut tex);
+            gl::with_current(|gl| {
+                unsafe {
+                    gl.GenTextures(1, &mut tex);
+                }
+                Self::load_image(
+                    gl_draw,
+                    gl,
+                    tex,
+                    width,
+                    height,
+                    data.as_ptr(),
+                    mem::align_of::<F::Data>(),
+                );
+            })
         }
         id = gl_draw.get_resource_generic::<Self>(tex, None);
-        unsafe {
-            Self::load_image(
-                gl_draw,
-                tex,
-                width,
-                height,
-                data.as_ptr(),
-                mem::align_of::<F::Data>(),
-            );
-        }
         Texture2D {
             image_id: id,
 
@@ -297,6 +306,7 @@ impl<F: TextureFormat> Texture2D<F> {
     #[allow(unused)]
     unsafe fn load_image(
         gl_draw: &mut GlDrawCore,
+        gl: &Gl,
         tex: u32,
         width: u32,
         height: u32,
@@ -305,9 +315,9 @@ impl<F: TextureFormat> Texture2D<F> {
     ) {
         let data_size = mem::size_of::<F::Data>();
         let num_comps = F::Components::COMPONENTS;
-        gl::BindTexture(gl::TEXTURE_2D, tex);
-        gl::PixelStorei(gl::UNPACK_ALIGNMENT, align as i32);
-        gl::TexImage2D(
+        gl.BindTexture(gl::TEXTURE_2D, tex);
+        gl.PixelStorei(gl::UNPACK_ALIGNMENT, align as i32);
+        gl.TexImage2D(
             gl::TEXTURE_2D,
             0,
             F::INTERNAL_FORMAT as i32,
@@ -319,16 +329,16 @@ impl<F: TextureFormat> Texture2D<F> {
             ptr as *const _,
         );
 
-        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
-        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
+        gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
+        gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
     }
 }
 
 unsafe impl<F: TextureFormat> BindTexture<F::Texture2D> for Texture2D<F> {
-    unsafe fn bind(&self) {
+    unsafe fn bind(&self, gl: &Gl) {
         let gl_draw = inner_gl_unsafe_static();
 
-        gl::BindTexture(
+        gl.BindTexture(
             gl::TEXTURE_2D,
             gl_draw.resource_list[self.image_id as usize],
         );

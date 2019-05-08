@@ -18,7 +18,7 @@ pub unsafe trait TupleIndex<T>: TupleNum {
 }
 
 pub unsafe trait TupleNum {
-	const N: usize;
+    const N: usize;
 }
 
 macro_rules! tup_index {
