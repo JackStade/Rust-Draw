@@ -12,53 +12,349 @@ use std::marker::PhantomData;
 use std::mem;
 use std::ptr;
 
-#[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum BindingType {
-    Float,
-    NormU8,
-    NormU16,
-    NormU32,
-    NormI8,
-    NormI16,
-    NormI32,
-    FloatU8,
-    FloatU16,
-    FloatU32,
-    FloatI8,
-    FloatI16,
-    FloatI32,
-    U8,
-    U16,
-    U32,
-    I8,
-    I16,
-    I32,
-}
-
-#[derive(Clone, Copy)]
-struct MeshBufferBinding {
-    buffer: u32,
-    size: u8,
-    instance_divisor: u8,
-    btype: BindingType,
-    offset: u32,
-    stride: u32,
-}
-
-pub struct Mesh<T: ShaderArgs> {
+pub struct ArrayMesh<T: ShaderArgs> {
+    // the mesh contains buffers, which prevent it from being send or sync
     buffers: Box<[Buffer]>,
     bindings: Box<[MeshBufferBinding]>,
-    num_verts: usize,
+    num_indices: u32,
+    num_instances: u32,
+    id: usize,
     phantom: PhantomData<T>,
+}
+
+pub unsafe fn test_mesh(window: &super::GlWindow) -> ArrayMesh<(Float3,)> {
+    let mut buffers = Vec::new();
+    let mut bindings = Vec::new();
+    let buf = VertexBuffer::new(
+        window,
+        &[
+            0.0f32, 0.0, 0.0, //
+            0.0, 0.5, 0.0, //
+            1.0, 0.5, 0.0, //
+            1.0, 0.0, 0.0, //
+        ],
+    );
+    buffers.push(buf.into_inner());
+    bindings.push(MeshBufferBinding {
+        buffer: 0,
+        size: 3,
+        instance_divisor: 0,
+        btype: 6,
+        offset: 0,
+        stride: 0,
+    });
+    ArrayMesh {
+        buffers: buffers.into_boxed_slice(),
+        bindings: bindings.into_boxed_slice(),
+        num_indices: 4,
+        num_instances: std::u32::MAX,
+        id: get_mesh_id(),
+        phantom: PhantomData,
+    }
 }
 
 pub struct IndexMesh<T: ShaderArgs> {
     buffers: Box<[Buffer]>,
     bindings: Box<[MeshBufferBinding]>,
     index_buffer: Buffer,
-    num_indices: usize,
+    index_type: GLenum,
+    num_indices: u32,
+    num_instances: u32,
+    id: usize,
     phantom: PhantomData<T>,
+}
+
+enum MeshDrawTypeEnum<'a> {
+    Single(u32, u32),
+    Multiple(&'a [u32], &'a [u32]),
+    Instanced(u32, u32, u32),
+}
+
+pub mod unsafe_api {
+    use super::*;
+    use fnv::FnvHashMap;
+    use glfw::ffi as glfw_raw;
+    use Gl;
+
+    static mut MESH_NUM: usize = 1;
+
+    /// This function must be called on the thread that owns the GlDraw
+    pub unsafe fn get_mesh_id() -> usize {
+        let n = MESH_NUM;
+        MESH_NUM += 1;
+        n
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct MeshBufferBinding {
+        pub buffer: u32,
+        pub size: u8,
+        pub instance_divisor: u16,
+        // the 1s 2s, and 3s bits represent the data type,
+        // 0 = U8
+        // 1 = U16
+        // 2 = U32
+        // 3 = I8
+        // 4 = I16
+        // 5 = I32
+        // 6 = Float
+        // the 4s and 5s bits represent whether to normalize the data,
+        // and whether to use VertexAttribPointer or VertexAttribIPointer
+        // 0 = float, unnormed
+        // 8 = float, normed
+        // 16 = int
+        pub btype: u8,
+        pub offset: u32,
+        pub stride: u32,
+    }
+
+    static mut VAO_MAP: *mut FnvHashMap<(usize, usize), GLuint> = 0 as *mut _;
+
+    /// Add the vao to the map. This vao will be bound to the current window.
+    #[inline]
+    pub unsafe fn add_vao(id: usize, vao: GLuint) {
+        if VAO_MAP.is_null() {
+            let b = Box::new(
+                FnvHashMap::<(usize, usize), GLuint>::with_capacity_and_hasher(
+                    16,
+                    Default::default(),
+                ),
+            );
+            VAO_MAP = Box::into_raw(b);
+        }
+        (*VAO_MAP).insert((id, crate::opengl::CURRENT_WINDOW as usize), vao);
+    }
+
+    /// Search for a vao corresponding to the current window and
+    /// the id given.
+    #[inline]
+    pub unsafe fn get_vao(id: usize) -> Option<GLuint> {
+        if VAO_MAP.is_null() {
+            return None;
+        }
+        (*VAO_MAP)
+            .get(&(id, crate::opengl::CURRENT_WINDOW as usize))
+            .map(|vao| *vao)
+    }
+
+    /// Clear all the vaos owned by a certain mesh. This should be
+    /// called when the mesh is dropped.
+    #[inline]
+    pub unsafe fn clear_vaos(id: usize) {
+        if !VAO_MAP.is_null() {
+            (*VAO_MAP).retain(|key, _| key.0 != id);
+        }
+    }
+
+    #[inline]
+    pub(crate) unsafe fn clear_window_vaos(window_ptr: *mut glfw_raw::GLFWwindow) {
+        if !VAO_MAP.is_null() {
+            (*VAO_MAP).retain(|key, _| key.1 != window_ptr as usize);
+        }
+    }
+
+    #[inline]
+    pub fn get_mesh_size<B: std::ops::Index<usize, Output = Buffer>>(
+        i: usize,
+        buffers: &B,
+        binding: MeshBufferBinding,
+    ) -> (u32, u32) {
+        let type_size = match (binding.btype & 0b111) {
+            0 => 1,
+            1 => 2,
+            2 => 4,
+            3 => 1,
+            4 => 2,
+            5 => 4,
+            _ => 4,
+        };
+        let size = type_size * binding.size as u32;
+        let stride;
+        if binding.stride == 0 {
+            stride = size;
+        } else {
+            stride = binding.stride;
+        }
+        let blen = buffers[binding.buffer as usize].buffer_len;
+        let mut sizes = (
+            ((blen as u32 - binding.offset - size) / stride) + 1,
+            std::u32::MAX,
+        );
+        if (binding.instance_divisor != 0) {
+            sizes = (
+                std::u32::MAX,
+                (((blen as u32 - binding.offset - size) / stride) + 1)
+                    * binding.instance_divisor as u32,
+            );
+        }
+        sizes
+    }
+
+    #[inline]
+    pub unsafe fn bind_mesh_buffer<B: std::ops::Index<usize, Output = Buffer> + ?Sized>(
+        gl: &Gl,
+        i: usize,
+        buffers: &B,
+        binding: MeshBufferBinding,
+    ) {
+        let gl_draw = super::inner_gl_unsafe_static();
+        gl.BindBuffer(
+            gl::ARRAY_BUFFER,
+            gl_draw.resource_list[buffers[binding.buffer as usize].buffer_id as usize],
+        );
+        let data_type = match (binding.btype & 0b111) {
+            0 => gl::UNSIGNED_BYTE,
+            1 => gl::UNSIGNED_SHORT,
+            2 => gl::UNSIGNED_INT,
+            3 => gl::BYTE,
+            4 => gl::SHORT,
+            5 => gl::INT,
+            _ => gl::FLOAT,
+        };
+
+        match (binding.btype & 0b11000) {
+            0 => {
+                gl.VertexAttribPointer(
+                    i as u32,
+                    binding.size as i32,
+                    data_type,
+                    gl::FALSE,
+                    binding.stride as i32,
+                    binding.offset as usize as *const _,
+                );
+            }
+            8 => {
+                gl.VertexAttribPointer(
+                    i as u32,
+                    binding.size as i32,
+                    data_type,
+                    gl::TRUE,
+                    binding.stride as i32,
+                    binding.offset as usize as *const _,
+                );
+            }
+            _ => {
+                gl.VertexAttribIPointer(
+                    i as u32,
+                    binding.size as i32,
+                    data_type,
+                    binding.stride as i32,
+                    binding.offset as usize as *const _,
+                );
+            }
+        }
+        if (binding.instance_divisor != 0) {
+            gl.VertexAttribDivisor(i as u32, binding.instance_divisor as u32);
+        }
+        gl.EnableVertexAttribArray(i as u32);
+    }
+}
+
+use self::unsafe_api::*;
+
+pub unsafe trait Mesh<In: ShaderArgs> {
+    type Drawer;
+
+    /// Drawers are allowed to assume that the context they exist in
+    /// has all the necessary objects bound correctly for a draw call to
+    /// work. Calling this function violates.
+    unsafe fn create_drawer(&self, mode: super::DrawMode) -> Self::Drawer;
+
+    unsafe fn bind(&self, gl: &Gl);
+}
+
+#[allow(missing_copy_implementations)]
+pub struct ArrayDrawer {
+    mode: GLenum,
+    num_indices: u32,
+    num_instances: u32,
+}
+
+impl ArrayDrawer {
+    pub fn draw_arrays(self, start: u32, count: u32) {
+        if cfg!(feature = "draw_call_bounds_checks") {
+            if (start + count) > self.num_indices {
+                panic!(
+                    "The smallest array in the mesh has {} elements, but the draw call requires {}.",
+                    self.num_indices, start + count
+                );
+            }
+        }
+        unsafe {
+            gl::with_current(|gl| gl.DrawArrays(self.mode, start as i32, count as i32));
+        }
+    }
+}
+
+unsafe impl<T: ShaderArgs> Mesh<T> for ArrayMesh<T> {
+    type Drawer = ArrayDrawer;
+
+    unsafe fn create_drawer(&self, mode: super::DrawMode) -> ArrayDrawer {
+        ArrayDrawer {
+            mode: mode.mode,
+            num_indices: self.num_indices,
+            num_instances: self.num_instances,
+        }
+    }
+
+    unsafe fn bind(&self, gl: &Gl) {
+        if let Some(vao) = get_vao(self.id) {
+            gl.BindVertexArray(vao);
+        } else {
+            let mut vao = 0;
+            gl.GenVertexArrays(1, &mut vao);
+            gl.BindVertexArray(vao);
+            for i in 0..self.buffers.len() {
+                bind_mesh_buffer(gl, i, &self.buffers[..], self.bindings[i]);
+            }
+            gl.BindBuffer(gl::ARRAY_BUFFER, 0);
+            add_vao(self.id, vao);
+        }
+    }
+}
+
+impl<T: ShaderArgs> Drop for ArrayMesh<T> {
+    fn drop(&mut self) {
+        unsafe {
+            clear_vaos(self.id);
+        }
+    }
+}
+
+unsafe impl<T: ShaderArgs> Mesh<T> for IndexMesh<T> {
+    type Drawer = ();
+
+    unsafe fn create_drawer(&self, mode: super::DrawMode) -> () {
+        unimplemented!();
+    }
+
+    unsafe fn bind(&self, gl: &Gl) {
+        if let Some(vao) = get_vao(self.id) {
+            gl.BindVertexArray(vao);
+        } else {
+            let mut vao = 0;
+            gl.GenVertexArrays(1, &mut vao);
+            gl.BindVertexArray(vao);
+            for i in 0..self.buffers.len() {
+                bind_mesh_buffer(gl, i, &self.buffers[..], self.bindings[i]);
+            }
+            let gl_draw = inner_gl_unsafe_static();
+            gl.BindBuffer(
+                gl::ELEMENT_ARRAY_BUFFER,
+                gl_draw.resource_list[self.index_buffer.buffer_id as usize],
+            );
+            gl.BindBuffer(gl::ARRAY_BUFFER, 0);
+            add_vao(self.id, vao);
+        }
+    }
+}
+
+impl<T: ShaderArgs> Drop for IndexMesh<T> {
+    fn drop(&mut self) {
+        unsafe {
+            clear_vaos(self.id);
+        }
+    }
 }
 
 #[repr(C)]
@@ -84,7 +380,7 @@ impl<T: GlDataType> VertexBuffer<T> {
                     gl::STATIC_DRAW,
                 );
                 gl.BindBuffer(gl::ARRAY_BUFFER, 0);
-                let hints = (gl::STATIC_DRAW as usize) << 32 + gl::ARRAY_BUFFER as usize;
+                let hints = ((gl::STATIC_DRAW as usize) << 32) + gl::ARRAY_BUFFER as usize;
 
                 let id = inner_gl_unsafe()
                     .get_resource_generic::<Buffer>(buffer, Some(hints as *mut ()));
@@ -172,13 +468,17 @@ where
 pub mod uniform {
     use super::Gl;
     use crate::opengl::shader::{
-        traits::*, Float, Float2, Float3, Float4, Int, Int2, Int3, Int4, UInt, UInt2, UInt3, UInt4,
+        traits::*, Float, Float2, Float2x2, Float2x3, Float2x4, Float3, Float3x2, Float3x3,
+        Float3x4, Float4, Float4x2, Float4x3, Float4x4, Int, Int2, Int3, Int4, UInt, UInt2, UInt3,
+        UInt4,
     };
     use crate::opengl::GlWindow;
     use crate::tuple::{AttachFront, RemoveFront, TupleIndex};
     use std::marker::PhantomData;
+    use std::rc::Rc;
 
-    static mut NUM_UNIFORMS: u64 = 0;
+    // note: 0 is a reserved value
+    static mut NUM_UNIFORMS: u64 = 1;
 
     pub struct Uniforms<T: ShaderArgs> {
         data: Box<[u32]>,
@@ -186,14 +486,7 @@ pub mod uniform {
         phantom: PhantomData<T>,
     }
 
-    struct UniformFn {
-        index: u32,
-        func: *const std::os::raw::c_void,
-        is_mat: bool,
-    }
-
     impl<T: ShaderArgs + ShaderArgsClass<UniformArgs>> Uniforms<T> {
-        // note: new_inner must only be called on the main thread.
         pub(crate) fn new_inner<S: SetUniforms<T>>(uniforms: S) -> Uniforms<T> {
             let mut i = 0;
             let mut len = 0;
@@ -201,14 +494,13 @@ pub mod uniform {
                 len += T::get_param(i).num_elements;
                 i += 1;
             }
-            let mut data = Vec::with_capacity(len as usize);
-            uniforms.push_to_vec(&mut data);
             let id;
-            // new_innder() will only be called on the thread owning the GlDraw
             unsafe {
                 id = NUM_UNIFORMS;
                 NUM_UNIFORMS += 1;
             }
+            let mut data = Vec::with_capacity(len as usize);
+            uniforms.push_to_vec(&mut data);
             Uniforms {
                 data: data.into_boxed_slice(),
                 id: id,
@@ -227,12 +519,12 @@ pub mod uniform {
                 len += T::get_param(i).num_elements;
                 i += 1;
             }
-            let v = vec![0u32; len as usize];
             let id;
             unsafe {
                 id = NUM_UNIFORMS;
                 NUM_UNIFORMS += 1;
             }
+            let v = vec![0u32; len as usize];
             Uniforms {
                 data: v.into_boxed_slice(),
                 id: id,
@@ -245,34 +537,40 @@ pub mod uniform {
             Self::default_inner()
         }
 
-        pub fn set_val<S: TupleIndex<T>, U: SetUniform<Arg = S::I>>(&self, u: U) {
+        pub fn set_val<S: TupleIndex<T>, U: SetUniform<S::I>>(&mut self, u: U) {
             let mut i = 0;
             let mut len = 0;
+            // the compiler can likely optimize this, since the length is
+            // a constant with respect to the type parameters
             while i < S::N {
                 len += T::get_param(i).num_elements;
                 i += 1;
             }
+
+            let slice =
+                &mut self.data[len as usize..len as usize + T::get_param(i).num_elements as usize];
+
+            u.copy_to_slice(slice);
         }
 
         #[inline]
         pub(crate) unsafe fn set_uniform(&self, gl: &Gl, n: u32, data_point: usize, location: u32) {
             let f = T::get_param(n as usize);
-            unimplemented!();
-            /*if f.is_mat {
-                crate::opengl::uniform_functions::call_mat(
+            let fn_ptr = gl.fn_ptrs[f.func];
+            if f.is_mat {
+                (std::mem::transmute::<_, extern "system" fn(i32, i32, u8, *const u32)>(fn_ptr))(
                     location as i32,
                     f.array_count as i32,
-                    &self.data[data_point..],
-                    ,
+                    super::gl::FALSE,
+                    self.data[data_point..].as_ptr(),
                 );
             } else {
-                crate::opengl::uniform_functions::call(
+                (std::mem::transmute::<_, extern "system" fn(i32, i32, *const u32)>(fn_ptr))(
                     location as i32,
                     f.array_count as i32,
-                    &self.data[data_point..],
-                    ,
+                    self.data[data_point..].as_ptr(),
                 );
-            }*/
+            }
         }
 
         pub(crate) unsafe fn set_uniforms<F: FnMut() -> u32>(&self, gl: &Gl, mut locations: F) {
@@ -296,12 +594,9 @@ pub mod uniform {
         }
     }
 
-    unsafe impl<
-            T: RemoveFront + Copy,
-            U: ShaderArgs + RemoveFront<Front = <T::Front as SetUniform>::Arg>,
-        > SetUniforms<U> for T
+    unsafe impl<T: RemoveFront + Copy, A, U: ShaderArgs + RemoveFront<Front = A>> SetUniforms<U> for T
     where
-        T::Front: SetUniform + ArgParameter<UniformArgs>,
+        T::Front: SetUniform<A> + ArgParameter<UniformArgs>,
         T::Remaining: SetUniforms<U::Remaining>,
         U::Remaining: ShaderArgs,
     {
@@ -318,17 +613,13 @@ pub mod uniform {
         }
     }
 
-    pub unsafe trait SetUniform: Copy {
-        type Arg;
-
+    pub unsafe trait SetUniform<T>: Copy {
         fn copy_to_slice(&self, vec: &mut [u32]);
     }
 
     macro_rules! set_uniform {
         ($t:ty, $arg:ident) => {
-            unsafe impl SetUniform for $t {
-                type Arg = $arg;
-
+            unsafe impl SetUniform<$arg> for $t {
                 fn copy_to_slice(&self, slice: &mut [u32]) {
                     // this is safe because the types used will only be
                     // f32, i32, and u32
@@ -337,9 +628,7 @@ pub mod uniform {
             }
         };
         (;$t:ty, $arg:ident) => {
-            unsafe impl SetUniform for $t {
-                type Arg = $arg;
-
+            unsafe impl SetUniform<$arg> for $t {
                 fn copy_to_slice(&self, slice: &mut [u32]) {
                     // this is safe because the types used will only be
                     // f32, i32, and u32
@@ -361,6 +650,16 @@ pub mod uniform {
     set_uniform!(;[i32; 2], Int2);
     set_uniform!(;[i32; 3], Int3);
     set_uniform!(;[i32; 4], Int4);
+
+    set_uniform!(;[f32; 4], Float2x2);
+    set_uniform!(;[f32; 6], Float2x3);
+    set_uniform!(;[f32; 8], Float2x4);
+    set_uniform!(;[f32; 6], Float3x2);
+    set_uniform!(;[f32; 9], Float3x3);
+    set_uniform!(;[f32; 12], Float3x4);
+    set_uniform!(;[f32; 8], Float4x2);
+    set_uniform!(;[f32; 12], Float4x3);
+    set_uniform!(;[f32; 16], Float4x4);
 
 }
 
@@ -471,7 +770,7 @@ impl<'a, T: ArgType + ArgParameter<TransparentArgs>> VecBufferBinding<'a, T> {
         };
 
         let num_elements = if len - offset as usize >= comps * s {
-            (len - offset as usize - comps * s) / (stride + 1) as usize
+            (len - offset as usize - comps * s) / stride as usize + 1
         } else {
             0
         };

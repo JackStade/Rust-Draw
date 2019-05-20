@@ -33,7 +33,11 @@ pub mod texture;
 
 pub mod mesh;
 
+pub mod target;
+
 static mut GL_DRAW: *mut GlDrawCore = 0 as *mut _;
+
+static mut CURRENT_WINDOW: *mut glfw_raw::GLFWwindow = 0 as *mut _;
 
 static mut WINDOW_GLOBAL: WindowGlobal = WindowGlobal {
     num_windows: 0,
@@ -147,6 +151,10 @@ struct WindowGlobal {
     total_windows: u32,
 }
 
+// the epoch is incremented every time resources are orphaned.
+//
+static mut EPOCH: u64 = 1;
+
 struct GlDrawCore {
     // resources are objects that are shared between contexts, and have all relevant data stored
     // on the gpu. When all windows are closed it is neccesary to "orphan" these resources by
@@ -189,9 +197,17 @@ pub mod gl {
     pub(super) static mut CURRENT: *const Gl = 0 as *const Gl;
 
     pub unsafe fn with_current<O, F: FnOnce(&Gl) -> O>(f: F) -> O {
-        unsafe { f(&*CURRENT) }
+        f(&*CURRENT)
     }
 
+    /// Note: in order for opengl function calls to work correctly,
+    /// the gl for the correct window must be used *and* that window
+    /// must be currently active.
+    ///
+    /// On some operating system the function pointers for different windows
+    /// may be the same, but this should not be relied upon. Calling a function
+    /// pointer when that window is not active should be considered to be
+    /// UB.
     pub unsafe fn get_gl<'a>(window: &'a GlWindow) -> &'a Gl {
         &window.gl
     }
@@ -233,7 +249,7 @@ impl GlDrawCore {
         )
     }
 
-    // note that a window is required in order to create new resources, so it is not
+    // note that a context is required in order to create gpu-side resources, so it is not
     // possible to create a resource in an orphan state
     fn get_resource_id(
         &mut self,
@@ -375,6 +391,7 @@ impl GlDraw {
         } else {
             gl_draw.windows[0]
         };
+        let old_context = unsafe { glfw_raw::glfwGetCurrentContext() };
         let window_ptr = unsafe {
             let window = glfw_raw::glfwCreateWindow(
                 width as c_int,
@@ -401,9 +418,7 @@ impl GlDraw {
             // to be sitting around on the stack
             gl = Box::new(gl::Gl::load_with(|symbol| {
                 let c_str = CString::new(symbol.as_bytes());
-                glfw_raw::glfwGetProcAddress(
-                    c_str.unwrap().as_ptr()
-                ) as *const _
+                glfw_raw::glfwGetProcAddress(c_str.unwrap().as_ptr()) as *const _
             }));
         }
 
@@ -517,6 +532,14 @@ impl GlDraw {
     }
 }
 
+pub(crate) unsafe fn activate_window(window: &GlWindow) {
+    if CURRENT_WINDOW != window.ptr {
+        glfw_raw::glfwMakeContextCurrent(window.ptr);
+        CURRENT_WINDOW = window.ptr;
+        gl::CURRENT = (&*window.gl) as *const Gl;
+    }
+}
+
 #[allow(unused)]
 extern "C" fn key_callback(
     window: *mut glfw_raw::GLFWwindow,
@@ -547,6 +570,15 @@ pub struct GlWindow {
     ptr: *mut glfw_raw::GLFWwindow,
     // rc::Rc is a non-send non-sync type
     phantom: PhantomData<std::rc::Rc<()>>,
+}
+
+pub(crate) struct WindowData {}
+
+impl WindowData {
+    fn new() -> *mut WindowData {
+        let data = Box::new(WindowData {});
+        Box::into_raw(data)
+    }
 }
 
 impl GlWindow {
@@ -590,6 +622,12 @@ impl GlWindow {
 
 impl Drop for GlWindow {
     fn drop(&mut self) {
+        unsafe {
+            if CURRENT_WINDOW == self.ptr {
+                CURRENT_WINDOW = 0 as *mut _;
+            }
+        }
+        window_cleanup(self.ptr);
         let global_data = unsafe { &mut WINDOW_GLOBAL };
         let gl_draw = unsafe { inner_gl_unsafe() };
         let pos = gl_draw
@@ -602,6 +640,7 @@ impl Drop for GlWindow {
         if global_data.num_windows == 1 {
             unsafe {
                 DRAW_INIT = false;
+                EPOCH += 1;
             }
             gl_draw.orphan_resources();
         }
@@ -612,130 +651,39 @@ impl Drop for GlWindow {
     }
 }
 
-pub mod draw {
-    use super::*;
-    use mesh::uniform;
-    use mesh::Buffer;
-    use mesh::InterfaceBinding;
-    use shader::traits::*;
-    use shader::ShaderProgram;
-    use DrawTypeEnum::*;
-
-    #[derive(Clone, Copy)]
-    pub enum DrawMode {
-        Triangles,
-        TriangleStip,
-        TriangleFan,
-        Lines,
-        LineStrip,
-        LineLoop,
+#[inline]
+fn window_cleanup(ptr: *mut glfw_raw::GLFWwindow) {
+    unsafe {
+        mesh::unsafe_api::clear_window_vaos(ptr);
     }
-
-    impl DrawMode {
-        fn get_mode(self) -> u32 {
-            match self {
-                DrawMode::Triangles => gl::TRIANGLES,
-                DrawMode::TriangleStip => gl::TRIANGLE_STRIP,
-                DrawMode::TriangleFan => gl::TRIANGLE_FAN,
-                DrawMode::Lines => gl::LINES,
-                DrawMode::LineStrip => gl::LINE_STRIP,
-                DrawMode::LineLoop => gl::LINE_LOOP,
-            }
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    pub struct DrawType<'a> {
-        ty: DrawTypeEnum<'a>,
-    }
-
-    impl<'a> DrawType<'a> {
-        fn new(ty: DrawTypeEnum<'a>) -> DrawType<'a> {
-            DrawType { ty: ty }
-        }
-
-        pub fn arrays(start: u32, count: u32) -> DrawType<'static> {
-            DrawType::new(DrawTypeEnum::<'static>::Arrays(start, count))
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    enum DrawTypeEnum<'a> {
-        Arrays(u32, u32),
-        Elements(&'a Buffer, GLenum, u32),
-        MultipleArrays(&'a [u32], &'a [u32]),
-        MultipleElements(&'a Buffer, GLuint, &'a [u32]),
-        InstancedArrays(u32, u32, u32),
-        InstancedElements(&'a Buffer, GLenum, u32, u32),
-    }
-
-    impl<'a> DrawTypeEnum<'a> {
-        unsafe fn draw(self, gl: &Gl, mode: GLenum) {
-            match self {
-                Arrays(start, count) => {
-                    gl.DrawArrays(mode, start as i32, count as i32);
-                }
-                Elements(buffer, ty, count) => {
-                    gl.BindBuffer(
-                        gl::ELEMENT_ARRAY_BUFFER,
-                        super::inner_gl_unsafe_static().resource_list[buffer.buffer_id as usize],
-                    );
-                    gl.DrawElements(mode, count as i32, ty, ptr::null());
-                }
-                _ => {
-                    unimplemented!();
-                }
-            }
-        }
-    }
-
-    /// The raw drawing function.
-    ///
-    /// This function does not provide any checks to ensure that the buffer have
-    /// enough range to execute the drawing command specified.
-    pub unsafe fn draw_unchecked<
-        In: ShaderArgs,
-        Uniforms: ShaderArgsClass<UniformArgs>,
-        Images: ShaderArgs,
-        Out: ShaderArgs,
-        InData: InterfaceBinding,
-        // Target: FrameBufferBinding,
-    >(
-        window: &GlWindow,
-        shader: &ShaderProgram<In, Uniforms, Images, Out>,
-        in_data: InData,
-        uniform_data: uniform::Uniforms<Uniforms>,
-        draw_type: DrawType,
-        mode: DrawMode,
-        // target: Target,
-    ) {
-        let gl = &window.gl;
-        let gl_draw = super::inner_gl_unsafe_static();
-        // activate_window(window);
-        gl.UseProgram(gl_draw.resource_list[shader.program_id as usize]);
-        let vao = window.draw_vao;
-
-        gl.BindVertexArray(vao);
-
-        in_data.bind_all_to_vao(gl, 0);
-
-        // target.bind_target();
-
-        let mut slice = &shader.uniform_locations[..];
-        uniform_data.set_uniforms(gl, || {
-            let s = slice[0];
-            slice = &slice[1..];
-            s as u32
-        });
-
-        draw_type.ty.draw(&gl, mode.get_mode());
-
-        gl.BindVertexArray(0);
-
-        gl.BindFramebuffer(gl::FRAMEBUFFER, 0);
-    }
-
 }
+
+#[derive(Clone, Copy)]
+pub struct DrawMode {
+    mode: GLenum,
+}
+
+pub const TRIANGLES: DrawMode = DrawMode {
+    mode: gl::TRIANGLES,
+};
+
+pub const TRIANGLE_STRIP: DrawMode = DrawMode {
+    mode: gl::TRIANGLE_STRIP,
+};
+
+pub const TRIANGLE_FAN: DrawMode = DrawMode {
+    mode: gl::TRIANGLE_FAN,
+};
+
+pub const LINES: DrawMode = DrawMode { mode: gl::LINES };
+
+pub const LINE_LOOP: DrawMode = DrawMode {
+    mode: gl::LINE_LOOP,
+};
+
+pub const LINE_STRIP: DrawMode = DrawMode {
+    mode: gl::LINE_STRIP,
+};
 
 /// For the lifetime of the DrawingSurface, it is assumed that the active context
 /// is the window.

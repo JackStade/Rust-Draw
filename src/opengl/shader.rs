@@ -245,15 +245,15 @@ pub enum DataType {
     Boolean2,
     Boolean3,
     Boolean4,
-    Mat2x2,
-    Mat2x3,
-    Mat2x4,
-    Mat3x2,
-    Mat3x3,
-    Mat3x4,
-    Mat4x2,
-    Mat4x3,
-    Mat4x4,
+    Float2x2,
+    Float2x3,
+    Float2x4,
+    Float3x2,
+    Float3x3,
+    Float3x4,
+    Float4x2,
+    Float4x3,
+    Float4x4,
     Sampler2D,
     IntSampler2D,
     UIntSampler2D,
@@ -279,15 +279,15 @@ impl DataType {
             DataType::Boolean2 => "bvec2",
             DataType::Boolean3 => "bvec3",
             DataType::Boolean4 => "bvec4",
-            DataType::Mat2x2 => "mat2",
-            DataType::Mat2x3 => "mat2x3",
-            DataType::Mat2x4 => "mat2x4",
-            DataType::Mat3x2 => "mat3x2",
-            DataType::Mat3x3 => "mat3",
-            DataType::Mat3x4 => "mat3x4",
-            DataType::Mat4x2 => "mat4x2",
-            DataType::Mat4x3 => "mat4x3",
-            DataType::Mat4x4 => "mat4x4",
+            DataType::Float2x2 => "mat2",
+            DataType::Float2x3 => "mat2x3",
+            DataType::Float2x4 => "mat2x4",
+            DataType::Float3x2 => "mat3x2",
+            DataType::Float3x3 => "mat3",
+            DataType::Float3x4 => "mat3x4",
+            DataType::Float4x2 => "mat4x2",
+            DataType::Float4x3 => "mat4x3",
+            DataType::Float4x4 => "mat4x4",
             DataType::Sampler2D => "sampler2D",
             DataType::IntSampler2D => "isampler2D",
             DataType::UIntSampler2D => "usampler2D",
@@ -540,14 +540,19 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs> 
 
 #[cfg(not(feature = "opengl41"))]
 impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs> GlResource
-    for ShaderProgram<In, Uniforms, Out>
+    for ShaderProgram<In, Uniforms, Images, Out>
 {
     unsafe fn adopt(ptr: *mut (), id: u32) -> Option<*mut ()> {
+        // we create a reference to the array to avoid dropping the CStrings
         let b = unsafe { &mut *(ptr as *mut [CString; 2]) };
         let gl_draw = unsafe { super::inner_gl_unsafe() };
         // since the underlying gl is only passed a pointer and not the slice length,
         // `as_bytes()` is equivalent to `as_bytes_with_nul()`
-        let program = get_program(b[0].as_bytes_with_nul(), b[1].as_bytes_with_nul());
+        let program = get_program(
+            b.strings[0].as_bytes_with_nul(),
+            b.strings[1].as_bytes_with_nul(),
+        );
+        ptr::write(b.id, 0);
         gl_draw.resource_list[id as usize] = program;
         None
     }
@@ -598,7 +603,7 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs> 
         // store any data in the pointer when not in an orphan state
     }
 
-    unsafe fn orphan(id: u32, _ptr: *mut ()) -> *mut () {
+    unsafe fn orphan(id: u32, ptr: *mut ()) -> *mut () {
         gl::with_current(|gl| {
             let gl_draw = super::inner_gl_unsafe();
             let program = gl_draw.resource_list[id as usize];
@@ -627,9 +632,62 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs> 
     }
 }
 
-impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs>
-    ShaderProgram<In, Uniforms, Images, Out>
+use super::mesh::Mesh;
+use super::target::RenderTarget;
+use super::DrawMode;
+use super::GlWindow;
+use render_options::RenderOptions;
+
+impl<
+        In: ShaderArgs,
+        Uniforms: ShaderArgsClass<UniformArgs>,
+        Images: ShaderArgs,
+        Out: ShaderArgs,
+    > ShaderProgram<In, Uniforms, Images, Out>
 {
+    pub fn draw<M: Mesh<In>, Target: RenderTarget<Out>, O: RenderOptions, F: Fn(M::Drawer)>(
+        &self,
+        _context: &GlWindow,
+        mesh: &M,
+        uniforms: super::mesh::uniform::Uniforms<Uniforms>,
+        target: &Target,
+        draw: F,
+        mode: DrawMode,
+        options: O,
+    ) {
+        unsafe {
+            // this will always be the active gl after bind_target is called
+            let gl = target.bind_target();
+            // need to make sure the reference is destroyed before calling
+            // set_uniforms or Mesh::bind because those functions might use
+            // a mutable reference to the draw core (though it is probably always
+            // a static reference).
+            {
+                let gl_draw = super::inner_gl_unsafe_static();
+                gl.UseProgram(gl_draw.resource_list[self.program_id as usize]);
+            }
+
+            let mut slice = &self.uniform_locations[..];
+
+            uniforms.set_uniforms(gl, || {
+                let loc = 0;
+                slice = &slice[1..];
+                loc
+            });
+
+            mesh.bind(gl);
+
+            let drawer = mesh.create_drawer(mode);
+
+            options.with_options(gl, || draw(drawer));
+
+            // we want to make sure any subsequent binds to
+            // the the element array buffer don't effect vao state
+            // (this is likely unecessary)
+            gl.BindVertexArray(0);
+        }
+    }
+
     #[cfg(feature = "opengl41")]
     fn new(
         program: GLuint,
@@ -666,6 +724,51 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs>
             phantom: PhantomData,
         }
     }
+}
+
+pub mod render_options {
+    use crate::opengl::Gl;
+    use crate::opengl::GlWindow;
+    use crate::tuple::{AttachFront, RemoveFront};
+
+    pub unsafe trait RenderOptions {
+        unsafe fn with_options<F: FnOnce()>(self, gl: &Gl, clo: F);
+    }
+
+    unsafe impl RenderOptions for () {
+        unsafe fn with_options<F: FnOnce()>(self, gl: &Gl, clo: F) {
+            clo();
+        }
+    }
+
+    unsafe impl<T: RemoveFront> RenderOptions for T
+    where
+        T::Front: RenderOption,
+        T::Remaining: RenderOptions,
+    {
+        unsafe fn with_options<F: FnOnce()>(self, gl: &Gl, clo: F) {
+            let (front, remaining) = self.remove_front();
+            let flags = front.set(gl);
+            remaining.with_options(gl, clo);
+            front.unset(gl, flags);
+        }
+    }
+
+    pub unsafe trait RenderOption: Copy {
+        unsafe fn set(self, gl: &Gl) -> u32;
+
+        unsafe fn unset(self, gl: &Gl, flags: u32);
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct DisableDepth;
+
+    pub const DISABLE_DEPTH: DisableDepth = DisableDepth;
+
+    pub struct Depth {
+        pub depth_enabled: bool,
+    }
+
 }
 
 /// Create a shader program with a vertex and a fragment shader.
@@ -2114,6 +2217,23 @@ macro_rules! vec_output {
     )
 }
 
+macro_rules! vec_uniform {
+    ($($vec_type:ident, $func:ident, $n:expr;)*) => (
+        $(
+            unsafe impl ArgParameter<UniformArgs> for $vec_type {
+                fn get_param() -> UniformArgs {
+                    UniformArgs {
+                        num_elements: $n,
+                        array_count: 1,
+                        is_mat: false,
+                        func: gl::INDICES.$func,
+                    }
+                }
+            }
+        )*
+    );
+}
+
 create_vec!(f32, "", Float4, Float3, Float2, Float;
     float4, float3, float2, float;
     Float4Arg, Float3Arg, Float2Arg, FloatArg);
@@ -2131,6 +2251,21 @@ vec_output!(Float4, Float3, Float2, Float, Int4, Int3, Int2, Int, UInt4, UInt3, 
 create_vec!(bool, "", Boolean4, Boolean3, Boolean2, Boolean;
     boolean4, boolean3, boolean2, boolean;
     Bool4Arg,  Bool3Arg, Bool2Arg, BoolArg);
+
+vec_uniform!(
+    Float4, Uniform4fv, 4;
+    Float3, Uniform3fv, 3;
+    Float2, Uniform2fv, 2;
+    Float, Uniform1fv, 1;
+    Int4, Uniform4iv, 4;
+    Int3, Uniform4iv, 3;
+    Int2, Uniform4iv, 2;
+    Int, Uniform4iv, 1;
+    UInt4, Uniform4uiv, 4;
+    UInt3, Uniform4uiv, 3;
+    UInt2, Uniform4uiv, 2;
+    UInt, Uniform4uiv, 1;
+);
 
 macro_rules! impl_matrix {
     ($matrix_type:ident, $matrix_fn:ident, $data:expr, $trait:ident) => (
@@ -2287,6 +2422,7 @@ macro_rules! create_matrix {
     )
 }
 
-create_matrix!(Float, Float4, Mat4x4, mat4x4, Mat4x4Arg, Mat3x4, mat3x4, Mat3x4Arg, Mat2x4, mat2x4, Mat2x4Arg,;
-    Float3, Mat4x3, mat4x3, Mat4x3Arg, Mat3x3, mat3x3, Mat3x3Arg, Mat2x3, mat2x3, Mat2x3Arg,;
-    Float2, Mat4x2, mat4x2, Mat4x2Arg, Mat3x2, mat3x2, Mat3x2Arg, Mat2x2, mat2x2, Mat2x2Arg,;);
+create_matrix!(Float,
+    Float4, Float4x4, mat4x4, Mat4x4Arg, Float3x4, mat3x4, Mat3x4Arg, Float2x4, mat2x4, Mat2x4Arg,;
+    Float3, Float4x3, mat4x3, Mat4x3Arg, Float3x3, mat3x3, Mat3x3Arg, Float2x3, mat2x3, Mat2x3Arg,;
+    Float2, Float4x2, mat4x2, Mat4x2Arg, Float3x2, mat3x2, Mat3x2Arg, Float2x2, mat2x2, Mat2x2Arg,;);

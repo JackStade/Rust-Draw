@@ -274,9 +274,7 @@ impl<F: TextureFormat> Texture2D<F> {
         let mut tex = 0;
         unsafe {
             gl::with_current(|gl| {
-                unsafe {
-                    gl.GenTextures(1, &mut tex);
-                }
+                gl.GenTextures(1, &mut tex);
                 Self::load_image(
                     gl_draw,
                     gl,

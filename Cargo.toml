@@ -3,7 +3,7 @@ name = "rust-draw"
 version = "0.1.0"
 authors = ["Jack Stade <jack.stade@gmail.com>"]
 edition = '2018'
-publis = false
+publish = false
 build = "build.rs"
 description = "This is a drawing/graphics library for Rust that is intended to be similar in concept to the Processing library for java. The goal is to allow drawing images and polygons with very few lines of code, but to also support more advanced rendering techniques. This library uses opengl as a backend."
 license = "Mit OR Apache"
@@ -11,16 +11,18 @@ license = "Mit OR Apache"
 [dependencies]
 image = "0.21.0"
 nalgebra = "0.17.0"
+fnv = "1.0.3"
 
-[build-dependencies]
-gl_generator = "0.5.0"
+[build-dependencies.gl_generator]
+version = "0.5.0"
+features = ["unstable_generator_utils"]
 
 [dependencies.glfw]
 version = "0.21.0"
 features = ["default"]
 
 [features]
-default = ["opengl45"]
+default = ["opengl45", "draw_call_bounds_checks"]
 
 opengl41 = []
 opengl42 = ["opengl41"]
@@ -28,5 +30,7 @@ opengl43 = ["opengl42"]
 opengl44 = ["opengl43"]
 opengl45 = ["opengl44"]
 opengl46 = ["opengl45"]
+
+draw_call_bounds_checks = []
 
 longer_tuples = []
