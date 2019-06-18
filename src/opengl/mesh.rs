@@ -22,37 +22,6 @@ pub struct ArrayMesh<T: ShaderArgs> {
     phantom: PhantomData<T>,
 }
 
-pub unsafe fn test_mesh(window: &super::GlWindow) -> ArrayMesh<(Float3,)> {
-    let mut buffers = Vec::new();
-    let mut bindings = Vec::new();
-    let buf = VertexBuffer::new(
-        window,
-        &[
-            0.0f32, 0.0, 0.0, //
-            0.0, 0.5, 0.0, //
-            1.0, 0.5, 0.0, //
-            1.0, 0.0, 0.0, //
-        ],
-    );
-    buffers.push(buf.into_inner());
-    bindings.push(MeshBufferBinding {
-        buffer: 0,
-        size: 3,
-        instance_divisor: 0,
-        btype: 6,
-        offset: 0,
-        stride: 0,
-    });
-    ArrayMesh {
-        buffers: buffers.into_boxed_slice(),
-        bindings: bindings.into_boxed_slice(),
-        num_indices: 4,
-        num_instances: std::u32::MAX,
-        id: get_mesh_id(),
-        phantom: PhantomData,
-    }
-}
-
 pub struct IndexMesh<T: ShaderArgs> {
     buffers: Box<[Buffer]>,
     bindings: Box<[MeshBufferBinding]>,
@@ -78,6 +47,22 @@ pub mod unsafe_api {
 
     static mut MESH_NUM: usize = 1;
 
+    pub unsafe fn create_array_mesh<T: ShaderArgsClass<TransparentArgs>>(
+        buffers: Box<[Buffer]>,
+        bindings: Box<[MeshBufferBinding]>,
+        num_indices: u32,
+        num_instances: u32,
+    ) -> ArrayMesh<T> {
+        ArrayMesh {
+            buffers: buffers,
+            bindings: bindings,
+            num_indices: num_indices,
+            num_instances: num_instances,
+            id: get_mesh_id(),
+            phantom: PhantomData,
+        }
+    }
+
     /// This function must be called on the thread that owns the GlDraw
     pub unsafe fn get_mesh_id() -> usize {
         let n = MESH_NUM;
@@ -87,25 +72,74 @@ pub mod unsafe_api {
 
     #[derive(Clone, Copy)]
     pub struct MeshBufferBinding {
-        pub buffer: u32,
-        pub size: u8,
-        pub instance_divisor: u16,
-        // the 1s 2s, and 3s bits represent the data type,
-        // 0 = U8
-        // 1 = U16
-        // 2 = U32
-        // 3 = I8
-        // 4 = I16
-        // 5 = I32
-        // 6 = Float
-        // the 4s and 5s bits represent whether to normalize the data,
-        // and whether to use VertexAttribPointer or VertexAttribIPointer
-        // 0 = float, unnormed
-        // 8 = float, normed
-        // 16 = int
-        pub btype: u8,
-        pub offset: u32,
-        pub stride: u32,
+        pub(crate) buffer: u32,
+        pub(crate) size: u8,
+        pub(crate) instance_divisor: u16,
+        /// the 1s 2s, and 3s bits represent the data type,
+        /// 0 = U8
+        /// 1 = U16
+        /// 2 = U32
+        /// 3 = I8
+        /// 4 = I16
+        /// 5 = I32
+        /// 6 = Float
+        /// the 4s and 5s bits represent whether to normalize the data,
+        /// and whether to use VertexAttribPointer or VertexAttribIPointer
+        /// 0 = float, unnormed
+        /// 8 = float, normed
+        /// 16 = int
+        pub(crate) btype: u8,
+        pub(crate) offset: u32,
+        pub(crate) stride: u32,
+    }
+
+    pub enum BindingFn {
+        NormFloat,
+        Float,
+        Int,
+    }
+
+    impl MeshBufferBinding {
+        pub fn new<T: GlDataType>(
+            buffer: u32,
+            size: u8,
+            instance_divisor: u16,
+            ty: BindingFn,
+            offset: u32,
+            stride: u32,
+        ) -> MeshBufferBinding {
+            if size > 4 {
+                panic!("Size must be either 1, 2, 3, or 4.");
+            }
+            let btype = match T::TYPE {
+                gl::UNSIGNED_BYTE => 0,
+                gl::UNSIGNED_SHORT => 1,
+                gl::UNSIGNED_INT => 2,
+                gl::BYTE => 3,
+                gl::SHORT => 4,
+                gl::INT => 5,
+                _ => 6,
+            };
+
+            let fn_ty = match ty {
+                BindingFn::NormFloat => 8,
+                BindingFn::Float => 0,
+                BindingFn::Int => 16,
+            };
+            let btype = if T::TYPE == gl::FLOAT {
+                btype
+            } else {
+                btype + fn_ty
+            };
+            MeshBufferBinding {
+                buffer: buffer,
+                size: size,
+                instance_divisor: instance_divisor,
+                btype: btype,
+                offset: offset,
+                stride: stride,
+            }
+        }
     }
 
     static mut VAO_MAP: *mut FnvHashMap<(usize, usize), GLuint> = 0 as *mut _;
@@ -474,6 +508,7 @@ pub mod uniform {
     };
     use crate::opengl::GlWindow;
     use crate::tuple::{AttachFront, RemoveFront, TupleIndex};
+    use nalgebra as na;
     use std::marker::PhantomData;
     use std::rc::Rc;
 
@@ -596,15 +631,16 @@ pub mod uniform {
 
     unsafe impl<T: RemoveFront + Copy, A, U: ShaderArgs + RemoveFront<Front = A>> SetUniforms<U> for T
     where
-        T::Front: SetUniform<A> + ArgParameter<UniformArgs>,
+        T::Front: SetUniform<A>,
         T::Remaining: SetUniforms<U::Remaining>,
+        U::Front: ArgParameter<UniformArgs>,
         U::Remaining: ShaderArgs,
     {
         fn push_to_vec(self, vec: &mut Vec<u32>) {
             let (front, remaining) = self.remove_front();
             let l = vec.len();
             unsafe {
-                let new_len = l + T::Front::get_param().num_elements as usize;
+                let new_len = l + U::Front::get_param().num_elements as usize;
                 assert!(vec.capacity() >= new_len);
                 vec.set_len(new_len);
             }
@@ -636,6 +672,17 @@ pub mod uniform {
                 }
             }
         };
+        (;;$t:ty, $arg:ident) => {
+            unsafe impl SetUniform<$arg> for $t {
+                fn copy_to_slice(&self, slice: &mut [u32]) {
+                    // this is safe because the types used will only be
+                    // f32, i32, and u32
+                    slice.copy_from_slice(unsafe {
+                        std::mem::transmute::<_, &[u32]>(self.as_slice())
+                    });
+                }
+            }
+        };
     }
 
     set_uniform!(f32, Float);
@@ -661,6 +708,15 @@ pub mod uniform {
     set_uniform!(;[f32; 12], Float4x3);
     set_uniform!(;[f32; 16], Float4x4);
 
+    set_uniform!(;;na::Matrix2<f32>, Float2x2);
+    set_uniform!(;;na::Matrix2x3<f32>, Float2x3);
+    set_uniform!(;;na::Matrix2x4<f32>, Float2x4);
+    set_uniform!(;;na::Matrix3x2<f32>, Float3x2);
+    set_uniform!(;;na::Matrix3<f32>, Float3x3);
+    set_uniform!(;;na::Matrix3x4<f32>, Float3x4);
+    set_uniform!(;;na::Matrix4x2<f32>, Float4x2);
+    set_uniform!(;;na::Matrix4x3<f32>, Float4x3);
+    set_uniform!(;;na::Matrix4<f32>, Float4x4);
 }
 
 #[derive(Clone, Copy)]

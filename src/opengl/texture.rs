@@ -1,8 +1,9 @@
 use super::gl;
-use super::shader::traits::GlDataType;
+use super::shader;
 use super::{inner_gl, inner_gl_unsafe, inner_gl_unsafe_static, GlDraw, GlDrawCore};
 use gl::types::*;
 use gl::Gl;
+use shader::traits::*;
 use std::marker::PhantomData;
 use std::{mem, ptr};
 
@@ -348,8 +349,39 @@ unsafe fn get_image(id: u32) -> GLuint {
     gl_draw.resource_list[id as usize]
 }
 
+pub fn texture<T: ExprType<S::Arg>, S: Sampler>(
+    sampler: Uniform<S>,
+    arg: T,
+) -> <(T, Uniform<S>) as ExprCombine<S::Out>>::Min
+where
+    (T, Uniform<S>): ExprCombine<S::Out>,
+{
+    // the arguments to this function cannot come from a non-main thread
+    let fmt_string = if unsafe { shader::SCOPE_DERIVS } {
+        "texture($, $)"
+    } else {
+        "textureLod($, $, 0)"
+    };
+    unsafe {
+        let (s, scope1) = arg.into_t();
+        let (a, scope2) = sampler.into_t();
+        <<(T, Uniform<S>) as ExprCombine<S::Out>>::Min>::from_t(
+            S::Out::create(
+                VarString::format(fmt_string, vec![s.as_shader_data(), a.as_shader_data()]),
+                ItemRef::Expr,
+            ),
+            scope1.merge(scope2),
+        )
+    }
+}
+
+pub unsafe trait Sampler: ArgType {
+    type Out: ArgType;
+    type Arg: ArgType;
+}
+
 macro_rules! sampler {
-    ($sampler:ident, $data:expr) => {
+    ($sampler:ident, $data_ty:expr, $data:ty, $arg:ty) => {
         #[derive(Clone)]
         pub struct $sampler {
             data: ProgramItem,
@@ -358,24 +390,36 @@ macro_rules! sampler {
         unsafe impl ArgType for $sampler {
             unsafe fn create(data: VarString, r: ItemRef) -> $sampler {
                 $sampler {
-                    data: ProgramItem::new(data, $data, r),
+                    data: ProgramItem::new(data, $data_ty, r),
                 }
             }
 
             fn data_type() -> DataType {
-                $data
+                $data_ty
             }
 
             fn as_shader_data(self) -> VarString {
                 self.data.into_inner()
             }
         }
+
+        unsafe impl ArgParameter<ImageArgs> for $sampler {
+            fn get_param() -> ImageArgs {
+                ImageArgs
+            }
+        }
+
+        unsafe impl Sampler for $sampler {
+            type Out = $data;
+            type Arg = $arg;
+        }
     };
 }
 
-use super::shader::{traits::ArgType, DataType, ItemRef, ProgramItem, VarString};
+use super::shader::{DataType, ItemRef, ProgramItem, VarString};
+use super::shader::{Float2, Float4, Int4, UInt4};
 
-sampler!(Sampler2D, DataType::Sampler2D);
-sampler!(IntSampler2D, DataType::IntSampler2D);
-sampler!(UIntSampler2D, DataType::UIntSampler2D);
-sampler!(FloatSampler2D, DataType::FloatSampler2D);
+sampler!(Sampler2D, DataType::Sampler2D, Float4, Float2);
+sampler!(IntSampler2D, DataType::IntSampler2D, Int4, Float2);
+sampler!(UIntSampler2D, DataType::UIntSampler2D, UInt4, Float2);
+sampler!(FloatSampler2D, DataType::FloatSampler2D, Float4, Float2);

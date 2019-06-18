@@ -156,7 +156,7 @@ pub struct VarString {
 }
 
 impl VarString {
-    fn new<S: fmt::Display>(string: S) -> VarString {
+    pub(crate) fn new<S: fmt::Display>(string: S) -> VarString {
         VarString {
             string: format!("{}", string),
             vars: Vec::new(),
@@ -170,7 +170,7 @@ impl VarString {
         }
     }
 
-    fn format(formatter: &str, strings: Vec<VarString>) -> VarString {
+    pub(crate) fn format(formatter: &str, strings: Vec<VarString>) -> VarString {
         let mut frags = formatter.split("$");
         let mut string = if let Some(frag) = frags.next() {
             format!("{}", frag)
@@ -649,7 +649,7 @@ impl<
         &self,
         _context: &GlWindow,
         mesh: &M,
-        uniforms: super::mesh::uniform::Uniforms<Uniforms>,
+        uniforms: &super::mesh::uniform::Uniforms<Uniforms>,
         target: &Target,
         draw: F,
         mode: DrawMode,
@@ -771,15 +771,20 @@ pub mod render_options {
 
 }
 
+// whether the current scope (from a shader compilation standpoint) has
+// implicit derivatives
+
+pub(crate) static mut SCOPE_DERIVS: bool = false;
+
 /// Create a shader program with a vertex and a fragment shader.
 ///
 /// Shaders can be used to cause more advanced behavior to happen on the GPU. The
 /// most common use is for lighting calculations. Shaders are a lower level feature
 /// that can be difficult to use correctly.
 pub fn create_program<
-    Uniforms: ShaderArgs + ShaderArgsClass<UniformArgs>,
-    Images: ShaderArgs + ShaderArgsClass<ImageArgs>,
-    In: ShaderArgs + ShaderArgsClass<TransparentArgs>,
+    Uniforms: ShaderArgsClass<UniformArgs>,
+    Images: ShaderArgsClass<ImageArgs>,
+    In: ShaderArgsClass<TransparentArgs>,
     Pass: IntoArgs,
     Out: IntoArgs,
     VertFN: FnOnce(
@@ -826,6 +831,7 @@ where
     .unwrap();
     let _ = Rc::try_unwrap(v_scope).expect("A value was moved out of the vertex shader generator and stored elsewhere. This is not allowed because it could cause generation of an invalid shader.");
     let f_scope = Rc::new(());
+
     let f_string = CString::new(create_shader_string::<
         Pass::Args,
         Uniforms,
@@ -960,7 +966,7 @@ where
     }
     shader = format!("{}\n", shader);
     let image_args = Images::map_args().args;
-    for i in 0..Uniforms::NARGS {
+    for i in 0..Images::NARGS {
         shader = format!(
             "{}uniform {} {}{};\n",
             shader,
@@ -996,7 +1002,7 @@ where
     // the create functions are marked as unsafe because it is neccesary to
     // ensure that the names created are defined in the shader.
     let in_type = unsafe { In::create(in_str) };
-    let uniform_type = unsafe { Uniforms::create(out_str) };
+    let uniform_type = unsafe { Uniforms::create(uniform_str) };
     let image_type = unsafe { Images::create(image_str) };
     let (out, bout) = unsafe {
         let input = in_type.as_varying(scope.clone());
@@ -1106,110 +1112,6 @@ pub(super) fn get_program(vertex_source: &[u8], fragment_source: &[u8]) -> GLuin
 }
 
 use self::swizzle::SwizzleMask;
-/// Swizzling operations are an important part of glsl.
-pub mod swizzle {
-    use super::traits::ArgType;
-    use crate::tuple;
-    use tuple::TupleIndex;
-
-    pub unsafe trait GlSZ {
-        type S;
-
-        type Set;
-
-        const ARG: &'static str;
-    }
-
-    pub unsafe trait SwizzleMask<T4, T3, T2, T1, S> {
-        type Swizzle;
-
-        type Out: ArgType;
-
-        fn get_vars() -> String;
-    }
-
-    pub unsafe trait SwizzleDepth<Vec> {}
-
-    macro_rules! swizzle_set {
-    	($set:ident, $($vals:ident),*;$($vars:ident),*;$($s:ty),*) => (
-    		$(
-    			unsafe impl GlSZ for $vals {
-    				type S = $s;
-
-    				type Set = $set;
-
-    				const ARG: &'static str = stringify!($vars);
-    			}
-    		)*
-    	);
-        ($set:ident, $($vals:ident),*;$($vars:ident),*) => (
-        	pub struct $set {}
-
-        	$(
-        		pub struct $vals {}
-
-        		pub const $vals: $vals = $vals {};
-        	)*
-
-        	impl_swizzle!(;Vec4, Vec3, Vec2, Vec1,;$($vals,)*);
-
-        	// swizzle_set!($set, $($vals),*;$($vars),*;tuple::T3, tuple::T2, tuple::T1, tuple::T0);
-        )
-    }
-
-    macro_rules! impl_swizzle {
-    	($($trait:ident),*;$($s:ident),*) => (
-    		$(pub struct $trait {})*
-    		swizzle_subs!(;$($trait,)*;$($s,)*);
-    	);
-    	(;;) => ();
-    	(;$t0:ident, $($trait:ident,)*;$s0:ident, $($s:ident,)*) => (
-			unsafe impl SwizzleDepth<$t0> for $s0 {}
-
-			$(
-				unsafe impl SwizzleDepth<$t0> for $s {}
-			)*
-
-			impl_swizzle!(;$($trait,)*;$($s,)*);
-    	)
-    }
-
-    macro_rules! swizzle_subs {
-    	($($top:ident,)*;;) => ();
-    	($($top:ident,)*;$t0:ident, $($t:ident,)*;$s0:ident, $($s:ident,)*) => (
-    		unsafe impl<S, T, $s0: GlSZ<Set=S> + SwizzleDepth<T>,$($s: GlSZ<Set=S> + SwizzleDepth<T>,)*
-    		$($top,)*$t0: ArgType,$($t),*> SwizzleMask<$($top,)*$t0,$($t,)*T>
-    		for ($s0,$($s,)*) {
-    			type Swizzle = ($s0::S,$($s::S,)*);
-
-    			type Out = $t0;
-
-    			fn get_vars() -> String {
-    				concat_args!($s0,$($s,)*)
-    			}
-    		}
-
-    		swizzle_subs!($($top,)*$t0,;$($t,)*;$($s,)*);
-    	)
-    }
-
-    macro_rules! concat_args {
-    	($a0:ident, $($arg:ident,)*) => (
-    		format!("{}{}", $a0::ARG, concat_args!($($arg,)*));
-    	);
-    	() => (
-    		""
-    	)
-    }
-
-    impl_swizzle!(Vec4, Vec3, Vec2, Vec1;T4, T3, T2, T1);
-
-    swizzle_set!(XYZW, W, Z, Y, X; w, z, y, x);
-
-    swizzle_set!(RGBA, A, B, G, R; a, b, g, r);
-
-    swizzle_set!(STPQ, Q, P, T, S; q, p, t, s);
-}
 
 pub mod api {
     pub use super::traits::Map;
@@ -1220,6 +1122,99 @@ pub mod api {
     pub type FragOutputs = super::BuiltInFragOutputs;
     pub type VertOutputs = super::BuiltInVertOutputs;
 }
+
+pub struct ProgramBuilderItem<'a, T: ArgType, E: ExprType> {
+    item: ProgramItem,
+    phantom: PhantomData<&'a (T, E)>,
+}
+
+impl<'a, T: ArgType, E: ExprType> Clone for ProgramBuilderItem<'a, T, E> {
+    fn clone(&self) -> ProgramBuilderItem<'a, T, E> {
+        ProgramBuilderItem {
+            item: self.item.clone(),
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<'a, T: ArgType, E, ExprType> ProgramBuilderItem<'a, E, T> {
+    fn create(data: VarString, r: ItemRef) -> ProgramBuilderItem<'a, T, E> {
+        ProgramBuilderItem {
+            item: ProgramItem::new(data, T::get_ty(), r),
+            phantom: PhantomData,
+        }
+    }
+
+    fn create_scoped(data: VarString, r: ItemRef, _scope: &'a ()) -> ProgramBuilderItem<'a, T, E> {
+        ProgramBuilderItem {
+            item: ProgramItem::new(data, T::get_ty(), r),
+            phantom: PhantomData,
+        }
+    }
+}
+
+macro_rules! item_ops {
+    ($op:ident, $op_fn:ident, $op_sym:expr) => {
+        impl<'a, L, R, E1, E2> $op<ProgramBuilderItem<'a, R, E1>>
+            for ProgramBuilderItem<'a, L, E2> where L: $op<R>, (E1, E2): ExprCombine
+        {
+            type Output = ProgramBuilderItem<'a, <(E1, E2) as ExprCombine>::Min>;
+
+            fn $op_fn(self, other: ProgramBuilderItem<'a, R, E2>) -> Self::Output {
+                ProgramBuilderItem::create(
+                    var_format!("(", $op_sym ,")"; self.item.arg, other.item.arg),
+                    Expr,
+                )
+            }
+        }
+
+        impl<'a, L, R, E1, E2> $op<ProgramBuilderItem<'a, R, E1>>
+            for &ProgramBuilderItem<'a, L, E2> where L: $op<R>, (E1, E2): ExprCombine
+        {
+            type Output = ProgramBuilderItem<'a, <(E1, E2) as ExprCombine>::Min>;
+
+            fn $op_fn(self, other: ProgramBuilderItem<'a, R, E2>) -> Self::Output {
+                // note: cloning the item causes a new variable to be assigned instead of copying
+                // a potentially long expression. 
+                ProgramBuilderItem::create(
+                    var_format!("(", $op_sym ,")"; self.item.clone().arg, other.item.arg),
+                    Expr,
+                )
+            }
+        }
+
+        impl<'a, L, R, E1, E2> $op<&ProgramBuilderItem<'a, R, E1>>
+            for ProgramBuilderItem<'a, L, E2> where L: $op<R>, (E1, E2): ExprCombine
+        {
+            type Output = ProgramBuilderItem<'a, <(E1, E2) as ExprCombine>::Min>;
+
+            fn $op_fn(self, other: ProgramBuilderItem<'a, R, E2>) -> Self::Output {
+                ProgramBuilderItem::create(
+                    var_format!("(", $op_sym ,")"; self.item.arg, other.item.clone().arg),
+                    Expr,
+                )
+            }
+        }
+
+        impl<'a, L, R, E1, E2> $op<&ProgramBuilderItem<'a, R, E1>>
+            for &ProgramBuilderItem<'a, L, E2> where L: $op<R>, (E1, E2): ExprCombine
+        {
+            type Output = ProgramBuilderItem<'a, <(E1, E2) as ExprCombine>::Min>;
+
+            fn $op_fn(self, other: ProgramBuilderItem<'a, R, E2>) -> Self::Output {
+                ProgramBuilderItem::create(
+                    var_format!("(", $op_sym ,")"; self.item.clone().data, other.item.clone().data),
+                    Expr,
+                )
+            }
+        }
+    };
+}
+
+item_ops!(Add, add, "+");
+item_ops!(Sub, sub, "-");
+item_ops!(Mul, mul, "*");
+item_ops!(Div, div, "/");
 
 #[allow(unused, unused_parens)]
 pub mod traits {
@@ -1574,7 +1569,7 @@ pub mod traits {
     }
 
     impl ScopeGaurd {
-        pub(super) fn merge(self, other: ScopeGaurd) -> ScopeGaurd {
+        pub(crate) fn merge(self, other: ScopeGaurd) -> ScopeGaurd {
             match (self, other) {
                 (ScopeGaurd::Free, ScopeGaurd::Free) => ScopeGaurd::Free,
                 (ScopeGaurd::Free, ScopeGaurd::Limited(rc, depth)) => {
@@ -1830,6 +1825,176 @@ pub mod traits {
 
     #[cfg(not(feature = "longer_tuples"))]
     args_set!(U1, U2, U3, U4, U5, U6, U7, U8, U9, U10, U11, U12, U13, U14, U15, U16,; 16);
+}
+
+pub mod vec {
+    pub unsafe trait VecLen {
+        type Next;
+        type Prev;
+    }
+
+    pub unsafe trait VecType {
+        type From: Copy;
+    }
+
+    pub struct Vec<T: VecType, L: VecLen> {
+        phantom: PhantomData<(T, L)>,
+    }
+
+    pub struct Float {
+        _hidden: (),
+    }
+
+    pub struct Int {
+        _hidden: (),
+    }
+
+    pub struct UInt {
+        _hidden: (),
+    }
+
+    pub struct Boolean {
+        _hidden: (),
+    }
+
+    unsafe impl VecType for Float {
+        type From = f32;
+    }
+
+    unsafe impl VecType for Int {
+        type From = i32;
+    }
+
+    unsafe impl VecType for UInt {
+        type From = u32;
+    }
+
+    unsafe impl VecType for Boolean {
+        type From = u32;
+    }
+
+    pub struct Vec0;
+
+    pub struct Vec1;
+
+    pub struct Vec2;
+
+    pub struct Vec3;
+
+    pub struct Vec4;
+
+    unsafe impl VecLen for Vec1 {
+        type Next = Vec2;
+        type Prev = Vec0;
+    }
+
+    unsafe impl VecLen for Vec2 {
+        type Next = Vec3;
+        type Prev = Vec1;
+    }
+
+    unsafe impl VecLen for Vec3 {
+        type Next = Vec4;
+        type Prev = Vec2;
+    }
+
+    unsafe impl VecLen for Vec4 {
+        type Next = ();
+        type Prev = Vec3;
+    }
+
+    pub unsafe trait Maybe0VecLen {
+        type Next;
+    }
+
+    unsafe impl Maybe0VecLen for Vec0 {
+        type Next = Vec1;
+    }
+
+    unsafe impl<T: VecLen> Maybe0VecLen for T {
+        type Next = T::Next;
+    }
+
+    pub unsafe trait MapFor<T: VecType, L: VecLen> {
+        type L_Out: Maybe0VecLen;
+
+        fn get_str() -> String;
+    }
+
+    unsafe impl<L: VecLen, T: VecType> MapFor<T, L> for () {
+        type L_Out = Vec0;
+
+        fn get_str() -> String {
+            format!("")
+        }
+    }
+
+    unsafe impl<L: VecLen, M: RemoveFront, T: VecType> MapFor<T, L> for M
+    where
+        <<M::Remaining as MapFor<T, L>>::L_Out as Maybe0VecLen>::Next: VecLen,
+        M::Front: MapElement + MapElementFor<L>,
+        M::Remaining: MapFor<T, L>,
+    {
+        type L_Out = <<M::Remaining as MapFor<T, L>>::L_Out as Maybe0VecLen>::Next;
+
+        fn get_str() -> String {
+            format!(
+                "{}{}",
+                <M::Front as MapElement>::V,
+                <M::Remaining as MapFor<T, L>>::get_str()
+            )
+        }
+    }
+
+    pub trait MapElement {
+        const V: &'static str;
+    }
+
+    pub unsafe trait MapElementFor<L: VecLen>: MapElement {}
+
+    pub struct X;
+
+    pub struct Y;
+
+    pub struct Z;
+
+    pub struct W;
+
+    unsafe impl MapElementFor<Vec1> for X {}
+
+    unsafe impl MapElementFor<Vec2> for X {}
+
+    unsafe impl MapElementFor<Vec3> for X {}
+
+    unsafe impl MapElementFor<Vec4> for X {}
+
+    unsafe impl MapElementFor<Vec2> for Y {}
+
+    unsafe impl MapElementFor<Vec3> for Y {}
+
+    unsafe impl MapElementFor<Vec4> for Y {}
+
+    unsafe impl MapElementFor<Vec3> for Z {}
+
+    unsafe impl MapElementFor<Vec4> for Z {}
+
+    unsafe impl MapElementFor<Vec4> for W {}
+
+    impl MapElement for X {
+        const V: &'static str = "x";
+    }
+
+    impl MapElement for Y {
+        const V: &'static str = "y";
+    }
+
+    impl MapElement for Z {
+        const V: &'static str = "z";
+    }
+
+    impl MapElement for W {
+        const V: &'static str = "w";
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2422,7 +2587,36 @@ macro_rules! create_matrix {
     )
 }
 
+macro_rules! mat_uniform {
+    ($($mat_type:ident, $func:ident, $n:expr;)*) => (
+        $(
+            unsafe impl ArgParameter<UniformArgs> for $mat_type {
+                fn get_param() -> UniformArgs {
+                    UniformArgs {
+                        num_elements: $n,
+                        array_count: 1,
+                        is_mat: true,
+                        func: gl::INDICES.$func,
+                    }
+                }
+            }
+        )*
+    );
+}
+
 create_matrix!(Float,
     Float4, Float4x4, mat4x4, Mat4x4Arg, Float3x4, mat3x4, Mat3x4Arg, Float2x4, mat2x4, Mat2x4Arg,;
     Float3, Float4x3, mat4x3, Mat4x3Arg, Float3x3, mat3x3, Mat3x3Arg, Float2x3, mat2x3, Mat2x3Arg,;
     Float2, Float4x2, mat4x2, Mat4x2Arg, Float3x2, mat3x2, Mat3x2Arg, Float2x2, mat2x2, Mat2x2Arg,;);
+
+mat_uniform!(
+    Float4x4, UniformMatrix4fv, 16;
+    Float4x3, UniformMatrix4x3fv, 12;
+    Float4x2, UniformMatrix4x2fv, 8;
+    Float3x4, UniformMatrix3x4fv, 12;
+    Float3x3, UniformMatrix3fv, 9;
+    Float3x2, UniformMatrix3x2fv, 6;
+    Float2x4, UniformMatrix2x4fv, 8;
+    Float2x3, UniformMatrix2x3fv, 6;
+    Float2x2, UniformMatrix2fv, 4;
+);

@@ -1,4 +1,4 @@
-use std::mem;
+#![allow(non_snake_case)]
 
 /// A TupleIndex is a compile time type that represents the index of an element in a tuple.
 /// Using this trait, the provided types can be used to pick elements from a tuple at compile
@@ -8,9 +8,6 @@ use std::mem;
 /// in this module, and that T will always be a tuple type.
 pub unsafe trait TupleIndex<T>: TupleNum {
     type I;
-
-    /// Returns one element of the tuple and `forgets` the rest.
-    fn get(t: T) -> Self::I;
 
     fn get_ref<'a>(t: &'a T) -> &'a Self::I;
 
@@ -26,17 +23,6 @@ macro_rules! tup_index {
 		#[allow(unused)]
 		unsafe impl<$($start,)*$u,$($end,)*> TupleIndex<($($end,)*$u,$($start,)*)> for $t {
 			type I = $u;
-
-			fn get(t: ($($end,)*$u,$($start,)*)) -> $u {
-				let ($($end,)*$u,$($start,)*) = t;
-				$(
-					mem::forget($start);
-				)*
-				$(
-					mem::forget($end);
-				)*
-				$u
-			}
 
 			fn get_ref<'a>(t: &'a ($($end,)*$u,$($start,)*)) -> &'a $u {
 				let ($($end,)*$u,$($start,)*) = t;
@@ -84,7 +70,7 @@ macro_rules! impl_tuple {
 impl_tuple!(
 	16;
 	T15, T14, T13, T12, T11, T10, T9, T8, T7, T6, T5, T4, T3, T2, T1, T0,;
-	I15, I14, I13, I14, I13, I12, I11, I10, I9, I8, I7, I6, I5, I4, I3, I2, I1, I0,;
+	I15, I14, I13, I12, I11, I10, I9, I8, I7, I6, I5, I4, I3, I2, I1, I0,;
 	U15, U14, U13, U12, U11, U10, U9, U8, U7, U6, U5, U4, U3, U2, U1, U0,
 );
 
@@ -122,9 +108,27 @@ pub trait RemoveBack {
     fn remove_back(self) -> (Self::Back, Self::Remaining);
 }
 
+pub trait TypeIterator<T, R> {
+    fn yeild(self) -> (T, R);
+}
+
+impl<T> TypeIterator<T, ()> for T {
+    fn yeild(self) -> (T, ()) {
+        (self, ())
+    }
+}
+
 macro_rules! tuple_vec_operations {
 	() => ();
 	($t0:ident, $($t:ident,)*) => (
+		impl<$t0,$($t,)*> TypeIterator<$t0, ($($t),*)> for ($t0,$($t,)*) {
+			fn yeild(self) -> ($t0, ($($t),*)) {
+				let ($t0,$($t,)*) = self;
+
+				($t0, ($($t),*))
+			}
+		}
+
 		impl<$t0,$($t,)*> AttachFront<$t0> for ($($t,)*) {
 			type AttachFront = ($t0,$($t,)*);
 
