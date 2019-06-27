@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::ffi::CString;
 use std::fmt;
 use std::marker::PhantomData;
-use std::ops::{Add, Div, Mul};
+use std::ops::{Add, Div, Mul, Sub};
 use std::ptr;
 use std::rc::Rc;
 use std::str;
@@ -66,7 +66,7 @@ void main() {
 }
 ";
 
-struct VarBuilder {
+pub struct VarBuilder {
     strings: Vec<String>,
     used_vars: usize,
     var_prefix: &'static str,
@@ -170,6 +170,24 @@ impl VarString {
         }
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.string.len()
+    }
+
+    pub(crate) fn substring(&self, start: usize, end: usize) -> VarString {
+        let s = format!("{}", &self.string[start..end]);
+        let mut v = Vec::new();
+        for (pos, var) in &self.vars {
+            if *pos >= start && *pos < end {
+                v.push((pos - start, var.clone()));
+            }
+        }
+        VarString {
+            string: s,
+            vars: v,
+        }
+    }
+
     pub(crate) fn format(formatter: &str, strings: Vec<VarString>) -> VarString {
         let mut frags = formatter.split("$");
         let mut string = if let Some(frag) = frags.next() {
@@ -204,7 +222,7 @@ macro_rules! var_format {
             let mut vars = Vec::new();
             $(
                 let s = $string;
-                let mut dq = VecDeque::from(s.vars);
+                let mut dq = std::collections::VecDeque::from(s.vars);
                 while let Some(var) = dq.pop_front() {
                     vars.push((var.0 + string.len(), var.1));
                 }
@@ -229,22 +247,7 @@ struct LoopIter {
 /// Represents a glsl data type.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DataType {
-    Float,
-    Float2,
-    Float3,
-    Float4,
-    Int,
-    Int2,
-    Int3,
-    Int4,
-    UInt,
-    UInt2,
-    UInt3,
-    UInt4,
-    Boolean,
-    Boolean2,
-    Boolean3,
-    Boolean4,
+    Vec(PrimType, u8),
     Float2x2,
     Float2x3,
     Float2x4,
@@ -260,25 +263,35 @@ pub enum DataType {
     FloatSampler2D,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PrimType {
+    Float,
+    Int,
+    UInt,
+    Boolean,
+}
+
 impl DataType {
     pub fn gl_type(self) -> &'static str {
+        use PrimType::*;
+
         match self {
-            DataType::Float => "float",
-            DataType::Float2 => "vec2",
-            DataType::Float3 => "vec3",
-            DataType::Float4 => "vec4",
-            DataType::Int => "int",
-            DataType::Int2 => "ivec2",
-            DataType::Int3 => "ivec3",
-            DataType::Int4 => "ivec4",
-            DataType::UInt => "uint",
-            DataType::UInt2 => "uvec2",
-            DataType::UInt3 => "uvec3",
-            DataType::UInt4 => "uvec4",
-            DataType::Boolean => "bool",
-            DataType::Boolean2 => "bvec2",
-            DataType::Boolean3 => "bvec3",
-            DataType::Boolean4 => "bvec4",
+            DataType::Vec(Float, 1) => "float",
+            DataType::Vec(Float, 2) => "vec2",
+            DataType::Vec(Float, 3) => "vec3",
+            DataType::Vec(Float, 4) => "vec4",
+            DataType::Vec(Int, 1) => "int",
+            DataType::Vec(Int, 2) => "ivec2",
+            DataType::Vec(Int, 3) => "ivec3",
+            DataType::Vec(Int, 4) => "ivec4",
+            DataType::Vec(UInt, 1) => "uint",
+            DataType::Vec(UInt, 2) => "uvec2",
+            DataType::Vec(UInt, 3) => "uvec3",
+            DataType::Vec(Boolean, 4) => "uvec4",
+            DataType::Vec(Boolean, 1) => "bool",
+            DataType::Vec(Boolean, 2) => "bvec2",
+            DataType::Vec(Boolean, 3) => "bvec3",
+            DataType::Vec(Boolean, 4) => "bvec4",
             DataType::Float2x2 => "mat2",
             DataType::Float2x3 => "mat2x3",
             DataType::Float2x4 => "mat2x4",
@@ -292,6 +305,7 @@ impl DataType {
             DataType::IntSampler2D => "isampler2D",
             DataType::UIntSampler2D => "usampler2D",
             DataType::FloatSampler2D => "fsampler2D",
+            _ => panic!("Unrecognized data type."),
         }
     }
 }
@@ -316,56 +330,47 @@ use builtin_vars::BuiltInOutputs;
 
 #[allow(unused)]
 pub mod builtin_vars {
+    use super::api::*;
     use super::traits::*;
-    use super::{Boolean, Float, Float2, Float3, Float4, Int};
+    use super::ProgramBuilderItem;
     use super::{ItemRef, VarBuilder, VarString};
     use crate::tuple::{AttachBack, AttachFront, RemoveBack, RemoveFront};
     use std::marker::PhantomData;
 
-    pub unsafe trait BuiltInOutput<T: ArgType> {
-        unsafe fn as_t(self, scope: ScopeGaurd) -> (Option<T>, ScopeGaurd);
+    pub trait BuiltInOutputs {
+        fn get_strings(self, v: &mut VarBuilder) -> String;
     }
 
-    pub(super) trait BuiltInOutputs {
-        fn get_strings(self, builder: &mut VarBuilder) -> String;
+    pub trait BuiltInOutput<'a, T: ArgType> {
+        fn as_arg(self) -> Option<VarString>;
     }
 
-    unsafe impl<T: ArgType> BuiltInOutput<T> for () {
-        unsafe fn as_t(self, scope: ScopeGaurd) -> (Option<T>, ScopeGaurd) {
-            (None, scope)
+    impl<'a, T: ArgType> BuiltInOutput<'a, T> for () {
+        fn as_arg(self) -> Option<VarString> {
+            None
         }
     }
 
-    unsafe impl<T: ArgType, S: IntoArg<Arg = T>> BuiltInOutput<T> for S {
-        unsafe fn as_t(self, scope: ScopeGaurd) -> (Option<T>, ScopeGaurd) {
-            let (arg, s) = self.into_arg();
-            (Some(arg), s.merge(scope))
+    impl<'a, T: ArgType, S: ItemType<'a, Ty = T>> BuiltInOutput<'a, T> for S {
+        fn as_arg(self) -> Option<VarString> {
+            Some(self.as_string())
         }
     }
 
-    fn create_in<S: ExprType<T>, T: ArgType>(s: &'static str) -> S {
-        unsafe {
-            S::from_t(
-                T::create(VarString::new(s), ItemRef::Static),
-                ScopeGaurd::Free,
-            )
-        }
-    }
-
-    fn create_in_with_scope<S: ExprType<T>, T: ArgType>(s: &'static str, scope: ScopeGaurd) -> S {
-        unsafe { S::from_t(T::create(VarString::new(s), ItemRef::Static), scope) }
+    fn create_in<'a, E: ExprType, T: ArgType>(s: &'static str) -> ProgramBuilderItem<'a, T, E> {
+        ProgramBuilderItem::create(VarString::new(s), ItemRef::Static)
     }
 
     pub struct BuiltInVertInputs {
-        pub vertex_id: Varying<Int>,
-        pub instance_id: Varying<Int>,
-        pub depth_near: Uniform<Float>,
-        pub depth_far: Uniform<Float>,
-        pub depth_diff: Uniform<Float>,
+        pub vertex_id: ProgramBuilderItem<'static, Int, Varying>,
+        pub instance_id: ProgramBuilderItem<'static, Int, Varying>,
+        pub depth_near: ProgramBuilderItem<'static, Float, Uniform>,
+        pub depth_far: ProgramBuilderItem<'static, Float, Uniform>,
+        pub depth_diff: ProgramBuilderItem<'static, Float, Uniform>,
     }
 
     impl BuiltInVertInputs {
-        pub(super) fn new(_scope: ScopeGaurd) -> BuiltInVertInputs {
+        pub(super) fn new() -> BuiltInVertInputs {
             BuiltInVertInputs {
                 vertex_id: create_in("gl_VertexID"),
                 instance_id: create_in("gl_InstanceID"),
@@ -376,72 +381,58 @@ pub mod builtin_vars {
         }
     }
 
-    pub struct BuiltInVertOutputs {
-        position: Float4,
-        point_size: Option<Float>,
+    pub struct BuiltInVertOutputs<'a> {
+        position: VarString,
+        point_size: Option<VarString>,
         clip_distance: (),
-        scope: ScopeGaurd,
+        phantom: PhantomData<&'a ()>,
     }
 
-    impl BuiltInOutputs for BuiltInVertOutputs {
+    impl<'a> BuiltInOutputs for BuiltInVertOutputs<'a> {
         fn get_strings(self, builder: &mut VarBuilder) -> String {
-            let mut string = format!(
-                "   gl_Position = {};\n",
-                builder.format_var(&self.position.as_shader_data())
-            );
+            let mut string = format!("   gl_Position = {};\n", builder.format_var(&self.position));
             if let Some(s) = self.point_size {
-                string = format!(
-                    "{}   gl_PointSize = {};\n",
-                    string,
-                    builder.format_var(&s.as_shader_data())
-                );
+                string = format!("{}   gl_PointSize = {};\n", string, builder.format_var(&s));
             }
             string
         }
     }
 
-    impl BuiltInVertOutputs {
-        pub fn position<T: IntoArg<Arg = Float4>>(position: T) -> BuiltInVertOutputs {
-            unsafe {
-                let (arg, scope) = position.into_arg();
-                BuiltInVertOutputs {
-                    position: arg,
-                    point_size: None,
-                    clip_distance: (),
-                    scope: scope,
-                }
+    impl<'a> BuiltInVertOutputs<'a> {
+        pub fn position<T: ItemType<'a, Ty = Float4>>(position: T) -> BuiltInVertOutputs<'a> {
+            BuiltInVertOutputs {
+                position: position.as_string(),
+                point_size: None,
+                clip_distance: (),
+                phantom: PhantomData,
             }
         }
 
-        pub fn create<T: IntoArg<Arg = Float4>, S: BuiltInOutput<Float>>(
+        pub fn create<T: ItemType<'a, Ty = Float>, S: BuiltInOutput<'a, Float>>(
             position: T,
             point_size: S,
-        ) -> BuiltInVertOutputs {
-            unsafe {
-                let (arg, scope) = position.into_arg();
-                let (point, scope) = point_size.as_t(scope);
-                BuiltInVertOutputs {
-                    position: arg,
-                    point_size: point,
-                    clip_distance: (),
-                    scope: scope,
-                }
+        ) -> BuiltInVertOutputs<'a> {
+            BuiltInVertOutputs {
+                position: position.as_string(),
+                point_size: point_size.as_arg(),
+                clip_distance: (),
+                phantom: PhantomData,
             }
         }
     }
 
     pub struct BuiltInFragInputs {
-        pub frag_coord: Varying<Float4>,
-        pub point_coord: Varying<Float2>,
-        pub primitive_id: Varying<Int>,
+        pub frag_coord: ProgramBuilderItem<'static, Float4, Varying>,
+        pub point_coord: ProgramBuilderItem<'static, Float2, Varying>,
+        pub primitive_id: ProgramBuilderItem<'static, Int, Varying>,
         pub clip_distance: (),
-        pub depth_near: Uniform<Float>,
-        pub depth_far: Uniform<Float>,
-        pub depth_diff: Uniform<Float>,
+        pub depth_near: ProgramBuilderItem<'static, Float, Uniform>,
+        pub depth_far: ProgramBuilderItem<'static, Float, Uniform>,
+        pub depth_diff: ProgramBuilderItem<'static, Float, Uniform>,
     }
 
     impl BuiltInFragInputs {
-        pub(super) fn new(_scope: ScopeGaurd) -> BuiltInFragInputs {
+        pub(super) fn new() -> BuiltInFragInputs {
             BuiltInFragInputs {
                 frag_coord: create_in("gl_FragCoord"),
                 point_coord: create_in("gl_PointCoord"),
@@ -454,65 +445,52 @@ pub mod builtin_vars {
         }
     }
 
-    pub struct BuiltInFragOutputs {
-        depth: Option<Float>,
-        discard: Option<Boolean>,
-        scope: ScopeGaurd,
+    pub struct BuiltInFragOutputs<'a> {
+        depth: Option<VarString>,
+        discard: Option<VarString>,
+        phantom: PhantomData<&'a ()>,
     }
 
-    impl BuiltInOutputs for BuiltInFragOutputs {
+    impl<'a> BuiltInOutputs for BuiltInFragOutputs<'a> {
         fn get_strings(self, builder: &mut VarBuilder) -> String {
             let mut string = String::new();
             if let Some(disc) = self.discard {
-                string = format!(
-                    "   if ({}) discard;\n",
-                    builder.format_var(&disc.as_shader_data())
-                );
+                string = format!("   if ({}) discard;\n", builder.format_var(&disc));
             }
             if let Some(dp) = self.depth {
-                string = format!(
-                    "{}   gl_FragDepth = {};\n",
-                    string,
-                    builder.format_var(&dp.as_shader_data())
-                );
+                string = format!("{}   gl_FragDepth = {};\n", string, builder.format_var(&dp));
             }
             string
         }
     }
 
-    impl BuiltInFragOutputs {
-        pub fn empty() -> BuiltInFragOutputs {
+    impl<'a> BuiltInFragOutputs<'a> {
+        pub fn empty() -> BuiltInFragOutputs<'static> {
             BuiltInFragOutputs {
                 depth: None,
                 discard: None,
-                scope: ScopeGaurd::Free,
+                phantom: PhantomData,
             }
         }
 
-        pub fn depth<T: IntoArg<Arg = Float>>(depth: T) -> BuiltInFragOutputs {
+        pub fn depth<T: ItemType<'a, Ty = Float>>(depth: T) -> BuiltInFragOutputs<'a> {
             unsafe {
-                let (arg, scope) = depth.into_arg();
                 BuiltInFragOutputs {
-                    depth: Some(arg),
+                    depth: Some(depth.as_string()),
                     discard: None,
-                    scope: scope,
+                    phantom: PhantomData,
                 }
             }
         }
 
-        pub fn create<T: BuiltInOutput<Float>, S: BuiltInOutput<Boolean>>(
+        pub fn create<T: BuiltInOutput<'a, Float>, S: BuiltInOutput<'a, Boolean>>(
             depth: T,
             discard: S,
-        ) -> BuiltInFragOutputs {
-            unsafe {
-                let scope = ScopeGaurd::Free;
-                let (depth, scope) = depth.as_t(scope);
-                let (discard, scope) = discard.as_t(scope);
-                BuiltInFragOutputs {
-                    depth: depth,
-                    discard: discard,
-                    scope: scope,
-                }
+        ) -> BuiltInFragOutputs<'a> {
+            BuiltInFragOutputs {
+                depth: depth.as_arg(),
+                discard: discard.as_arg(),
+                phantom: PhantomData,
             }
         }
     }
@@ -771,6 +749,20 @@ pub mod render_options {
 
 }
 
+pub struct ProgramBuilder<'a> {
+    phantom: PhantomData<&'a ()>,
+}
+
+/// This function is used to provide a ProgramBuilder to
+/// a closure. This helps to ensure that the variables used to construct
+/// a program don't outlive the invocation of `create_program`
+pub fn build_program<T, F: FnOnce(ProgramBuilder) -> T>(f: F) -> T {
+    let b = ProgramBuilder {
+        phantom: PhantomData,
+    };
+    f(b)
+}
+
 // whether the current scope (from a shader compilation standpoint) has
 // implicit derivatives
 
@@ -782,32 +774,36 @@ pub(crate) static mut SCOPE_DERIVS: bool = false;
 /// most common use is for lighting calculations. Shaders are a lower level feature
 /// that can be difficult to use correctly.
 pub fn create_program<
-    Uniforms: ShaderArgsClass<UniformArgs>,
-    Images: ShaderArgsClass<ImageArgs>,
-    In: ShaderArgsClass<TransparentArgs>,
-    Pass: IntoArgs,
-    Out: IntoArgs,
+    'a,
+    Uniforms: ShaderArgsClass<UniformArgs> + IntoWrapped<'a, Uniform>,
+    Images: ShaderArgsClass<ImageArgs> + IntoWrapped<'a, Uniform>,
+    In: ShaderArgsClass<TransparentArgs> + IntoWrapped<'a, Varying>,
+    Pass: WrappedShaderArgs<'a>,
+    Out: WrappedShaderArgs<'a>,
     VertFN: FnOnce(
-        In::AsVarying,
-        Uniforms::AsUniform,
-        Images::AsUniform,
+        In::Wrapped,
+        Uniforms::Wrapped,
+        Images::Wrapped,
         BuiltInVertInputs,
-    ) -> (Pass, BuiltInVertOutputs),
+    ) -> (Pass, BuiltInVertOutputs<'a>),
     FragFN: FnOnce(
-        <Pass::Args as ShaderArgs>::AsVarying,
-        Uniforms::AsUniform,
-        Images::AsUniform,
+        <Pass::Inner as IntoWrapped<'a, Varying>>::Wrapped,
+        Uniforms::Wrapped,
+        Images::Wrapped,
         BuiltInFragInputs,
-    ) -> (Out, BuiltInFragOutputs),
+    ) -> (Out, BuiltInFragOutputs<'a>),
 >(
     _window: &super::GlWindow,
+    builder: ProgramBuilder<'a>,
     vertex_shader_fn: VertFN,
     fragment_shader_fn: FragFN,
-) -> ShaderProgram<In, Uniforms, Images, Out::Args>
+) -> ShaderProgram<In, Uniforms, Images, Out::Inner>
 where
-    Out::Args: ShaderArgs + ShaderArgsClass<TransparentArgs> + ShaderArgsClass<OutputArgs>,
-    Pass::Args: ShaderArgsClass<TransparentArgs>,
+    Out::Inner:
+        ShaderArgsClass<TransparentArgs> + ShaderArgsClass<OutputArgs> + IntoWrapped<'a, Varying>,
+    Pass::Inner: ShaderArgsClass<TransparentArgs> + IntoWrapped<'a, Varying>,
 {
+
     let v_scope = Rc::new(());
     let v_string = CString::new(create_shader_string::<
         In,
@@ -819,12 +815,11 @@ where
         VertFN,
     >(
         vertex_shader_fn,
-        BuiltInVertInputs::new(ScopeGaurd::Limited(v_scope.clone(), 0)),
+        BuiltInVertInputs::new(),
         "in",
         "u",
         "tex",
         "pass",
-        ScopeGaurd::Limited(v_scope.clone(), 0),
         true,
         false,
     ))
@@ -833,7 +828,7 @@ where
     let f_scope = Rc::new(());
 
     let f_string = CString::new(create_shader_string::<
-        Pass::Args,
+        Pass::Inner,
         Uniforms,
         Images,
         Out,
@@ -842,17 +837,15 @@ where
         FragFN,
     >(
         fragment_shader_fn,
-        BuiltInFragInputs::new(ScopeGaurd::Limited(f_scope.clone(), 0)),
+        BuiltInFragInputs::new(),
         "pass",
         "u",
         "tex",
         "out",
-        ScopeGaurd::Limited(f_scope.clone(), 0),
         false,
         true,
     ))
     .unwrap();
-    let _ = Rc::try_unwrap(f_scope).expect("A value was moved out of the fragment shader generator and stored elsewhere. This is not allowed because it could cause generation of an invalid shader.");
     let program = get_program(v_string.as_bytes_with_nul(), f_string.as_bytes_with_nul());
     let mut uniform_locations = vec![0; Uniforms::NARGS];
     let mut image_locations = vec![0; Images::NARGS];
@@ -912,31 +905,31 @@ const VERSION: &str = "#version 450 core";
 const VERSION: &str = "#version 460 core";
 
 fn create_shader_string<
-    In: ShaderArgs + ShaderArgsClass<TransparentArgs>,
-    Uniforms: ShaderArgs,
-    Images: ShaderArgs,
-    Out: IntoArgs,
+    'a,
+    In: ShaderArgsClass<TransparentArgs> + IntoWrapped<'a, Varying>,
+    Uniforms: ShaderArgs + IntoWrapped<'a, Uniform>,
+    Images: ShaderArgs + IntoWrapped<'a, Uniform>,
+    Out: WrappedShaderArgs<'a>,
     T,
     S: builtin_vars::BuiltInOutputs,
-    Shader: FnOnce(In::AsVarying, Uniforms::AsUniform, Images::AsUniform, T) -> (Out, S),
+    Shader: FnOnce(In::Wrapped, Uniforms::Wrapped, Images::Wrapped, T) -> (Out, S),
 >(
     generator: Shader,
     gen_in: T,
 
-    in_str: &'static str,
-    uniform_str: &'static str,
-    image_str: &'static str,
-    out_str: &'static str,
-    scope: ScopeGaurd,
+    in_str: &str,
+    uniform_str: &str,
+    image_str: &str,
+    out_str: &str,
 
     input_qualifiers: bool,
     output_qualifiers: bool,
 ) -> String
 where
-    Out::Args: ShaderArgsClass<TransparentArgs>,
+    Out::Inner: ShaderArgsClass<TransparentArgs>,
 {
     let mut shader = format!("{}\n", VERSION);
-    let in_args = In::map_args().args;
+    let in_args = In::map_args();
     let mut position = 0;
     for i in 0..In::NARGS {
         if input_qualifiers {
@@ -954,7 +947,7 @@ where
         }
     }
     shader = format!("{}\n", shader);
-    let uniform_args = Uniforms::map_args().args;
+    let uniform_args = Uniforms::map_args();
     for i in 0..Uniforms::NARGS {
         shader = format!(
             "{}uniform {} {}{};\n",
@@ -965,7 +958,7 @@ where
         );
     }
     shader = format!("{}\n", shader);
-    let image_args = Images::map_args().args;
+    let image_args = Images::map_args();
     for i in 0..Images::NARGS {
         shader = format!(
             "{}uniform {} {}{};\n",
@@ -976,9 +969,9 @@ where
         );
     }
     shader = format!("{}\n", shader);
-    let out_args = Out::Args::map_args().args;
+    let out_args = Out::Inner::map_args();
     let mut position = 0;
-    for i in 0..Out::Args::NARGS {
+    for i in 0..Out::Inner::NARGS {
         if output_qualifiers {
             shader = format!(
                 "{}layout(location = {}) out {} {}{};\n",
@@ -988,7 +981,7 @@ where
                 out_str,
                 i,
             );
-            position += Out::Args::get_param(i).num_locations;
+            position += Out::Inner::get_param(i).num_locations;
         } else {
             shader = format!(
                 "{}out {} {}{};\n",
@@ -1001,28 +994,19 @@ where
     }
     // the create functions are marked as unsafe because it is neccesary to
     // ensure that the names created are defined in the shader.
-    let in_type = unsafe { In::create(in_str) };
-    let uniform_type = unsafe { Uniforms::create(uniform_str) };
-    let image_type = unsafe { Images::create(image_str) };
     let (out, bout) = unsafe {
-        let input = in_type.as_varying(scope.clone());
-        let image = image_type.as_uniform(scope.clone());
-        let uniform = uniform_type.as_uniform(scope);
-        let (out, builtin) = generator(input, uniform, image, gen_in);
-        (out.into_args().0.map_data_args().args, builtin)
+        let input = In::into_wrapped(in_str);
+        let image = Images::into_wrapped(image_str);
+        let uniform = Uniforms::into_wrapped(uniform_str);
+        generator(input, uniform, image, gen_in)
     };
     shader = format!("{}\n\nvoid main() {{\n", shader);
     let mut builder = VarBuilder::new("var");
-    let mut out_strings = Vec::with_capacity(out.len());
-    for i in 0..out.len() {
-        out_strings.push(builder.format_var(&out[i].1));
-    }
+    let mut out_strings = out.get_strings(out_str, &mut builder);
     let bstring = bout.get_strings(&mut builder);
     shader = builder.add_strings(shader);
     shader = format!("{}{}\n", shader, bstring);
-    for i in 0..out.len() {
-        shader = format!("{}   {}{} = {};\n", shader, out_str, i, out_strings[i]);
-    }
+    shader = format!("{}{}\n", shader, out_strings);
     shader = format!("{}}}\n", shader);
     println!("{}\n", shader);
     shader
@@ -1111,16 +1095,46 @@ pub(super) fn get_program(vertex_source: &[u8], fragment_source: &[u8]) -> GLuin
     }
 }
 
-use self::swizzle::SwizzleMask;
+// shouldn't cause any problems
+use api::*;
+use traits::*;
+use vec::*;
 
 pub mod api {
-    pub use super::traits::Map;
-    pub use super::{Bool2Arg, Bool3Arg, Bool4Arg, BoolArg};
-    pub use super::{Float2Arg, Float3Arg, Float4Arg, FloatArg};
-    pub use super::{Int2Arg, Int3Arg, Int4Arg, IntArg};
+    use super::vec;
+    use vec::GlVec;
+    use vec::{Vec1, Vec2, Vec3, Vec4};
 
-    pub type FragOutputs = super::BuiltInFragOutputs;
-    pub type VertOutputs = super::BuiltInVertOutputs;
+    pub type Float = GlVec<vec::VecFloat, Vec1>;
+    pub type Float2 = GlVec<vec::VecFloat, Vec2>;
+    pub type Float3 = GlVec<vec::VecFloat, Vec3>;
+    pub type Float4 = GlVec<vec::VecFloat, Vec4>;
+
+    pub type Int = GlVec<vec::VecInt, Vec1>;
+    pub type Int2 = GlVec<vec::VecInt, Vec2>;
+    pub type Int3 = GlVec<vec::VecInt, Vec3>;
+    pub type Int4 = GlVec<vec::VecInt, Vec4>;
+
+    pub type UInt = GlVec<vec::VecUInt, Vec1>;
+    pub type UInt2 = GlVec<vec::VecUInt, Vec2>;
+    pub type UInt3 = GlVec<vec::VecUInt, Vec3>;
+    pub type UInt4 = GlVec<vec::VecUInt, Vec4>;
+
+    pub type Boolean = GlVec<vec::VecBoolean, Vec1>;
+    pub type Boolean2 = GlVec<vec::VecBoolean, Vec2>;
+    pub type Boolean3 = GlVec<vec::VecBoolean, Vec3>;
+    pub type Boolean4 = GlVec<vec::VecBoolean, Vec4>;
+
+    pub use super::{
+        Float2x2, Float2x3, Float2x4, Float3x2, Float3x3, Float3x4, Float4x2, Float4x3, Float4x4,
+    };
+
+    pub type FragOutputs<'a> = super::BuiltInFragOutputs<'a>;
+    pub type VertOutputs<'a> = super::BuiltInVertOutputs<'a>;
+
+    pub mod map {
+        pub use super::vec::{X, Y, Z, W};
+    }
 }
 
 pub struct ProgramBuilderItem<'a, T: ArgType, E: ExprType> {
@@ -1137,17 +1151,17 @@ impl<'a, T: ArgType, E: ExprType> Clone for ProgramBuilderItem<'a, T, E> {
     }
 }
 
-impl<'a, T: ArgType, E, ExprType> ProgramBuilderItem<'a, E, T> {
-    fn create(data: VarString, r: ItemRef) -> ProgramBuilderItem<'a, T, E> {
+impl<'a, T: ArgType, E: ExprType> ProgramBuilderItem<'a, T, E> {
+    pub(crate) fn create(data: VarString, r: ItemRef) -> ProgramBuilderItem<'a, T, E> {
         ProgramBuilderItem {
-            item: ProgramItem::new(data, T::get_ty(), r),
+            item: ProgramItem::new(data, T::data_type(), r),
             phantom: PhantomData,
         }
     }
 
     fn create_scoped(data: VarString, r: ItemRef, _scope: &'a ()) -> ProgramBuilderItem<'a, T, E> {
         ProgramBuilderItem {
-            item: ProgramItem::new(data, T::get_ty(), r),
+            item: ProgramItem::new(data, T::data_type(), r),
             phantom: PhantomData,
         }
     }
@@ -1155,55 +1169,17 @@ impl<'a, T: ArgType, E, ExprType> ProgramBuilderItem<'a, E, T> {
 
 macro_rules! item_ops {
     ($op:ident, $op_fn:ident, $op_sym:expr) => {
-        impl<'a, L, R, E1, E2> $op<ProgramBuilderItem<'a, R, E1>>
-            for ProgramBuilderItem<'a, L, E2> where L: $op<R>, (E1, E2): ExprCombine
+        impl<'a, L: ArgType, R: ArgType, E1: ExprType, E2: ExprType> $op<ProgramBuilderItem<'a, R, E1>>
+            for ProgramBuilderItem<'a, L, E2>
+        where
+            L: $op<R>, (E1, E2): ExprCombine,
+            L::Output: ArgType,
         {
-            type Output = ProgramBuilderItem<'a, <(E1, E2) as ExprCombine>::Min>;
+            type Output = ProgramBuilderItem<'a, L::Output, <(E1, E2) as ExprCombine>::Min>;
 
-            fn $op_fn(self, other: ProgramBuilderItem<'a, R, E2>) -> Self::Output {
+            fn $op_fn(self, other: ProgramBuilderItem<'a, R, E1>) -> Self::Output {
                 ProgramBuilderItem::create(
-                    var_format!("(", $op_sym ,")"; self.item.arg, other.item.arg),
-                    Expr,
-                )
-            }
-        }
-
-        impl<'a, L, R, E1, E2> $op<ProgramBuilderItem<'a, R, E1>>
-            for &ProgramBuilderItem<'a, L, E2> where L: $op<R>, (E1, E2): ExprCombine
-        {
-            type Output = ProgramBuilderItem<'a, <(E1, E2) as ExprCombine>::Min>;
-
-            fn $op_fn(self, other: ProgramBuilderItem<'a, R, E2>) -> Self::Output {
-                // note: cloning the item causes a new variable to be assigned instead of copying
-                // a potentially long expression. 
-                ProgramBuilderItem::create(
-                    var_format!("(", $op_sym ,")"; self.item.clone().arg, other.item.arg),
-                    Expr,
-                )
-            }
-        }
-
-        impl<'a, L, R, E1, E2> $op<&ProgramBuilderItem<'a, R, E1>>
-            for ProgramBuilderItem<'a, L, E2> where L: $op<R>, (E1, E2): ExprCombine
-        {
-            type Output = ProgramBuilderItem<'a, <(E1, E2) as ExprCombine>::Min>;
-
-            fn $op_fn(self, other: ProgramBuilderItem<'a, R, E2>) -> Self::Output {
-                ProgramBuilderItem::create(
-                    var_format!("(", $op_sym ,")"; self.item.arg, other.item.clone().arg),
-                    Expr,
-                )
-            }
-        }
-
-        impl<'a, L, R, E1, E2> $op<&ProgramBuilderItem<'a, R, E1>>
-            for &ProgramBuilderItem<'a, L, E2> where L: $op<R>, (E1, E2): ExprCombine
-        {
-            type Output = ProgramBuilderItem<'a, <(E1, E2) as ExprCombine>::Min>;
-
-            fn $op_fn(self, other: ProgramBuilderItem<'a, R, E2>) -> Self::Output {
-                ProgramBuilderItem::create(
-                    var_format!("(", $op_sym ,")"; self.item.clone().data, other.item.clone().data),
+                    var_format!("(", $op_sym, ")"; self.as_string(), other.as_string()),
                     Expr,
                 )
             }
@@ -1219,8 +1195,12 @@ item_ops!(Div, div, "/");
 #[allow(unused, unused_parens)]
 pub mod traits {
     use super::gl;
-    use super::swizzle::SwizzleMask;
-    use super::{DataType, ItemRef, ShaderArgDataList, ShaderArgList, VarExpr, VarString};
+    use super::ItemRef::*;
+    use super::VarBuilder;
+
+    use super::{
+        DataType, ItemRef, ProgramBuilderItem, ShaderArgDataList, ShaderArgList, VarExpr, VarString,
+    };
     use std::ops::{Add, Div, Mul, Neg, Sub};
 
     pub unsafe trait GlDataType: Copy {
@@ -1255,407 +1235,97 @@ pub mod traits {
         const TYPE: gl::types::GLenum = gl::FLOAT;
     }
 
-    pub unsafe trait ArgType: Clone {
-        /// Do not call this function.
-        unsafe fn create(data: VarString, r: ItemRef) -> Self;
-
+    pub unsafe trait ArgType: 'static + Clone {
         fn data_type() -> DataType;
-
-        fn as_shader_data(self) -> VarString;
     }
 
-    pub unsafe trait ExprType<T: ArgType>: Clone {
-        unsafe fn into_t(self) -> (T, ScopeGaurd);
+    pub unsafe trait ExprType: 'static {}
 
-        unsafe fn from_t(t: T, scope: ScopeGaurd) -> Self;
+    /// This is a helper trait for implementing ExprMin
+    pub trait ExprCombine {
+        type Min: ExprType;
     }
 
-    pub trait IntoArg {
-        type Arg: ArgType;
-
-        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd);
+    /// The trait exprmin is implemented for tuples of Expr types
+    pub trait ExprMin {
+        type Min: ExprType;
     }
 
-    pub trait IntoArgs {
-        type Args: ShaderArgs;
-
-        unsafe fn into_args(self) -> (Self::Args, ScopeGaurd);
-    }
-
-    pub trait IntoConstant<T: ArgType> {
-        fn into_constant(self, scope: ScopeGaurd) -> Constant<T>;
-    }
-
-    pub trait IntoUniform<T: ArgType> {
-        fn into_uniform(self, scope: ScopeGaurd) -> Uniform<T>;
-    }
-
-    pub trait IntoVarying<T: ArgType> {
-        fn into_varying(self, scope: ScopeGaurd) -> Varying<T>;
-    }
-
-    impl<T: ArgType> IntoArg for Constant<T> {
-        type Arg = T;
-
-        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd) {
-            (self.arg, self.scope)
-        }
-    }
-
-    impl<T: ArgType> IntoArg for Uniform<T> {
-        type Arg = T;
-
-        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd) {
-            (self.arg, self.scope)
-        }
-    }
-
-    impl<T: ArgType> IntoArg for Varying<T> {
-        type Arg = T;
-
-        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd) {
-            (self.arg, self.scope)
-        }
-    }
-
-    impl<T: ArgType> IntoArg for &Constant<T> {
-        type Arg = T;
-
-        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd) {
-            (self.arg.clone(), self.scope.clone())
-        }
-    }
-
-    impl<T: ArgType> IntoArg for &Uniform<T> {
-        type Arg = T;
-
-        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd) {
-            (self.arg.clone(), self.scope.clone())
-        }
-    }
-
-    impl<T: ArgType> IntoArg for &Varying<T> {
-        type Arg = T;
-
-        unsafe fn into_arg(self) -> (Self::Arg, ScopeGaurd) {
-            (self.arg.clone(), self.scope.clone())
-        }
-    }
-
-    macro_rules! wrapper_ops {
-        ($op:ident, $op_func:ident) => {
-            wrapper_impls!($op, $op_func, Constant, Constant, Constant);
-            wrapper_impls!($op, $op_func, Constant, Uniform, Uniform);
-            wrapper_impls!($op, $op_func, Uniform, Constant, Uniform);
-            wrapper_impls!($op, $op_func, Uniform, Uniform, Uniform);
-            wrapper_impls!($op, $op_func, Constant, Varying, Varying);
-            wrapper_impls!($op, $op_func, Varying, Constant, Varying);
-            wrapper_impls!($op, $op_func, Uniform, Varying, Varying);
-            wrapper_impls!($op, $op_func, Varying, Uniform, Varying);
-            wrapper_impls!($op, $op_func, Varying, Varying, Varying);
-        };
-    }
-
-    macro_rules! wrapper_impls {
-        ($op:ident, $op_func:ident, $l:ident, $r:ident, $o:ident) => {
-            impl<O: ArgType, L: ArgType + $op<R, Output = O>, R: ArgType> $op<$r<R>> for $l<L> {
-                type Output = $o<O>;
-
-                fn $op_func(self, rhs: $r<R>) -> $o<O> {
-                    $o {
-                        arg: $op::$op_func(self.arg, rhs.arg),
-                        scope: self.scope.merge(rhs.scope),
-                    }
-                }
-            }
-
-            impl<O: ArgType, L: ArgType + $op<R, Output = O> + Clone, R: ArgType> $op<$r<R>>
-                for &$l<L>
-            {
-                type Output = $o<O>;
-
-                fn $op_func(self, rhs: $r<R>) -> $o<O> {
-                    let se = self.clone();
-                    $o {
-                        arg: $op::$op_func(se.arg, rhs.arg),
-                        scope: se.scope.merge(rhs.scope),
-                    }
-                }
-            }
-
-            impl<O: ArgType, L: ArgType + $op<R, Output = O>, R: ArgType + Clone> $op<&$r<R>>
-                for $l<L>
-            {
-                type Output = $o<O>;
-
-                fn $op_func(self, rhs: &$r<R>) -> $o<O> {
-                    let other = rhs.clone();
-                    $o {
-                        arg: $op::$op_func(self.arg, other.arg),
-                        scope: self.scope.merge(other.scope),
-                    }
-                }
-            }
-
-            impl<O: ArgType, L: ArgType + $op<R, Output = O> + Clone, R: ArgType + Clone>
-                $op<&$r<R>> for &$l<L>
-            {
-                type Output = $o<O>;
-
-                fn $op_func(self, rhs: &$r<R>) -> $o<O> {
-                    let se = self.clone();
-                    let other = rhs.clone();
-                    $o {
-                        arg: $op::$op_func(se.arg, other.arg),
-                        scope: se.scope.merge(other.scope),
-                    }
-                }
-            }
-        };
-    }
-
-    wrapper_ops!(Add, add);
-    wrapper_ops!(Sub, sub);
-    wrapper_ops!(Mul, mul);
-    wrapper_ops!(Div, div);
-
-    impl<T: ArgType> IntoConstant<T> for T {
-        fn into_constant(self, scope: ScopeGaurd) -> Constant<T> {
-            Constant {
-                arg: self,
-                scope: scope,
-            }
-        }
-    }
-
-    impl<T: ArgType> IntoUniform<T> for T {
-        fn into_uniform(self, scope: ScopeGaurd) -> Uniform<T> {
-            Uniform {
-                arg: self,
-                scope: scope,
-            }
-        }
-    }
-
-    impl<T: ArgType> IntoVarying<T> for T {
-        fn into_varying(self, scope: ScopeGaurd) -> Varying<T> {
-            Varying {
-                arg: self,
-                scope: scope,
-            }
-        }
-    }
-
-    pub trait ExprCombine<T: ArgType> {
-        type Min: ExprType<T>;
-    }
-
-    pub trait ExprMin<T: ArgType> {
-        type Min: ExprType<T>;
-    }
-
-    impl<A: ArgType, T: crate::tuple::RemoveFront> ExprMin<A> for T
+    impl<T: crate::tuple::RemoveFront> ExprMin for T
     where
-        T::Front: ExprCombine<A>,
-        T::Remaining: ExprCombine<A>,
-        (
-            <T::Front as ExprCombine<A>>::Min,
-            <T::Remaining as ExprCombine<A>>::Min,
-        ): ExprCombine<A>,
+        T::Front: ExprType,
+        T::Remaining: ExprMin,
+        (T::Front, <T::Remaining as ExprMin>::Min): ExprCombine,
     {
-        type Min = <(
-            <T::Front as ExprCombine<A>>::Min,
-            <T::Remaining as ExprCombine<A>>::Min,
-        ) as ExprCombine<A>>::Min;
+        type Min = <(T::Front, <T::Remaining as ExprMin>::Min) as ExprCombine>::Min;
     }
 
-    impl<T: ArgType, S: ArgType> ExprCombine<T> for Constant<S> {
-        type Min = Constant<T>;
+    impl ExprMin for () {
+        type Min = Constant;
     }
 
-    impl<T: ArgType, S: ArgType> ExprCombine<T> for Uniform<S> {
-        type Min = Uniform<T>;
+    impl ExprMin for Constant {
+        type Min = Constant;
     }
 
-    impl<T: ArgType, S: ArgType> ExprCombine<T> for Varying<S> {
-        type Min = Varying<T>;
+    impl ExprMin for Uniform {
+        type Min = Uniform;
     }
 
-    impl<T: ArgType, S: ArgType> ExprCombine<T> for &Constant<S> {
-        type Min = Constant<T>;
+    impl ExprMin for Varying {
+        type Min = Varying;
     }
 
-    impl<T: ArgType, S: ArgType> ExprCombine<T> for &Uniform<S> {
-        type Min = Uniform<T>;
+    impl ExprCombine for (Constant, Constant) {
+        type Min = Constant;
     }
 
-    impl<T: ArgType, S: ArgType> ExprCombine<T> for &Varying<S> {
-        type Min = Varying<T>;
+    impl ExprCombine for (Constant, Uniform) {
+        type Min = Uniform;
     }
 
-    impl<T: ArgType, S: ArgType> ExprCombine<T> for (Constant<S>,) {
-        type Min = Constant<T>;
+    impl ExprCombine for (Constant, Varying) {
+        type Min = Varying;
     }
 
-    impl<T: ArgType, S: ArgType> ExprCombine<T> for (Uniform<S>,) {
-        type Min = Uniform<T>;
+    impl ExprCombine for (Uniform, Constant) {
+        type Min = Uniform;
     }
 
-    impl<T: ArgType, S: ArgType> ExprCombine<T> for (Varying<S>,) {
-        type Min = Varying<T>;
+    impl ExprCombine for (Uniform, Uniform) {
+        type Min = Uniform;
     }
 
-    impl<T: ArgType, S: ArgType> ExprCombine<T> for (&Constant<S>,) {
-        type Min = Constant<T>;
+    impl ExprCombine for (Uniform, Varying) {
+        type Min = Varying;
     }
 
-    impl<T: ArgType, S: ArgType> ExprCombine<T> for (&Uniform<S>,) {
-        type Min = Uniform<T>;
+    impl ExprCombine for (Varying, Constant) {
+        type Min = Varying;
     }
 
-    impl<T: ArgType, S: ArgType> ExprCombine<T> for (&Varying<S>,) {
-        type Min = Varying<T>;
+    impl ExprCombine for (Varying, Uniform) {
+        type Min = Varying;
     }
 
-    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Constant<L>, Constant<R>) {
-        type Min = Constant<T>;
+    impl ExprCombine for (Varying, Varying) {
+        type Min = Varying;
     }
 
-    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Uniform<L>, Constant<R>) {
-        type Min = Uniform<T>;
-    }
+    #[derive(Clone, Copy)]
+    pub struct Constant {}
 
-    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Constant<L>, Uniform<R>) {
-        type Min = Uniform<T>;
-    }
+    #[derive(Clone, Copy)]
+    pub struct Uniform {}
 
-    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Uniform<L>, Uniform<R>) {
-        type Min = Uniform<T>;
-    }
+    #[derive(Clone, Copy)]
+    pub struct Varying {}
 
-    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Varying<L>, Constant<R>) {
-        type Min = Varying<T>;
-    }
+    unsafe impl ExprType for Constant {}
 
-    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Constant<L>, Varying<R>) {
-        type Min = Varying<T>;
-    }
+    unsafe impl ExprType for Uniform {}
 
-    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Varying<L>, Uniform<R>) {
-        type Min = Varying<T>;
-    }
-
-    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Uniform<L>, Varying<R>) {
-        type Min = Varying<T>;
-    }
-
-    impl<T: ArgType, L: ArgType, R: ArgType> ExprCombine<T> for (Varying<L>, Varying<R>) {
-        type Min = Varying<T>;
-    }
-
-    use std::rc::Rc;
-
-    /// This type must be public because it is used in the methods for the public
-    /// trait `ShaderArgs`
-    #[derive(Clone)]
-    pub enum ScopeGaurd {
-        // free is used for built in inputs and constants, where
-        // it won't break anything to use the input between invocations.
-        // This is useful because constant initializers for types don't
-        // have any way of accessing a scope, and indeed can be called outside
-        // of a generation function
-        Free,
-        Limited(Rc<()>, usize),
-    }
-
-    impl ScopeGaurd {
-        pub(crate) fn merge(self, other: ScopeGaurd) -> ScopeGaurd {
-            match (self, other) {
-                (ScopeGaurd::Free, ScopeGaurd::Free) => ScopeGaurd::Free,
-                (ScopeGaurd::Free, ScopeGaurd::Limited(rc, depth)) => {
-                    ScopeGaurd::Limited(rc, depth)
-                }
-                (ScopeGaurd::Limited(rc, depth), ScopeGaurd::Free) => {
-                    ScopeGaurd::Limited(rc, depth)
-                }
-                (ScopeGaurd::Limited(rc1, depth1), ScopeGaurd::Limited(rc2, depth2)) => {
-                    if depth1 > depth2 {
-                        ScopeGaurd::Limited(rc1, depth1)
-                    } else {
-                        ScopeGaurd::Limited(rc2, depth2)
-                    }
-                }
-            }
-        }
-    }
-
-    #[derive(Clone)]
-    pub struct Constant<T: ArgType> {
-        pub(super) arg: T,
-        pub(super) scope: ScopeGaurd,
-    }
-
-    #[derive(Clone)]
-    pub struct Uniform<T: ArgType> {
-        pub(super) arg: T,
-        pub(super) scope: ScopeGaurd,
-    }
-
-    #[derive(Clone)]
-    pub struct Varying<T: ArgType> {
-        pub(super) arg: T,
-        pub(super) scope: ScopeGaurd,
-    }
-
-    unsafe impl<T: ArgType> ExprType<T> for Constant<T> {
-        unsafe fn into_t(self) -> (T, ScopeGaurd) {
-            (self.arg, self.scope)
-        }
-
-        unsafe fn from_t(t: T, scope: ScopeGaurd) -> Self {
-            Constant {
-                arg: t,
-                scope: scope,
-            }
-        }
-    }
-
-    unsafe impl<T: ArgType> ExprType<T> for Uniform<T> {
-        unsafe fn into_t(self) -> (T, ScopeGaurd) {
-            (self.arg, self.scope)
-        }
-
-        unsafe fn from_t(t: T, scope: ScopeGaurd) -> Self {
-            Uniform {
-                arg: t,
-                scope: scope,
-            }
-        }
-    }
-
-    unsafe impl<T: ArgType> ExprType<T> for Varying<T> {
-        unsafe fn into_t(self) -> (T, ScopeGaurd) {
-            (self.arg, self.scope)
-        }
-
-        unsafe fn from_t(t: T, scope: ScopeGaurd) -> Self {
-            Varying {
-                arg: t,
-                scope: scope,
-            }
-        }
-    }
-
-    pub trait Map<T: ArgType, T1: ArgType, T2: ArgType, T3: ArgType, T4: ArgType, S>:
-        ExprType<T>
-    {
-        fn map<SZ: SwizzleMask<T1, T2, T3, T4, S>>(
-            &self,
-            mask: SZ,
-        ) -> <Self as ExprCombine<SZ::Out>>::Min
-        where
-            Self: ExprCombine<SZ::Out>;
-    }
+    unsafe impl ExprType for Varying {}
 
     pub unsafe trait ArgClass: Copy {}
 
@@ -1707,24 +1377,35 @@ pub mod traits {
     pub unsafe trait ShaderArgs {
         const NARGS: usize;
 
-        /// Do not call this function.
-        unsafe fn create(prefix: &'static str) -> Self;
-
-        type AsUniform;
-
-        type AsVarying;
-
-        unsafe fn as_uniform(self, scope: ScopeGaurd) -> Self::AsUniform;
-
-        unsafe fn as_varying(self, scope: ScopeGaurd) -> Self::AsVarying;
-
-        fn map_args() -> ShaderArgList;
-
-        fn map_data_args(self) -> ShaderArgDataList;
+        fn map_args() -> Vec<DataType>;
     }
 
-    pub unsafe trait Construct<T: ArgType> {
-        fn as_arg(self) -> T;
+    pub unsafe trait IntoWrapped<'a, E: ExprType> {
+        type Wrapped: WrappedShaderArgs<'a>;
+
+        unsafe fn into_wrapped(prefix: &str) -> Self::Wrapped;
+    }
+
+    pub unsafe trait WrappedShaderArgs<'a> {
+        type Inner: ShaderArgs;
+        type Min: ExprType;
+
+        fn get_strings(self, prefix: &str, b: &mut VarBuilder) -> String;
+    }
+
+    unsafe impl<'a, T: ArgType, E: ExprType> WrappedShaderArgs<'a> for ProgramBuilderItem<'a, T, E> {
+        type Inner = (T,);
+        type Min = E;
+
+        fn get_strings(self, prefix: &str, b: &mut VarBuilder) -> String {
+            let s = b.format_var(&self.as_string());
+
+            format!("   {}0 = {};", prefix, s)
+        }
+    }
+
+    pub trait Construct<'a, T: ArgType, E: ExprType> {
+        fn construct(self) -> ProgramBuilderItem<'a, T, E>;
     }
 
     /// Sometimes it is neccessary to restrict a type to only certain types
@@ -1733,71 +1414,91 @@ pub mod traits {
         fn get_param(i: usize) -> T;
     }
 
+    pub unsafe trait ItemType<'a>: Sized {
+        type Expr: ExprType;
+        type Ty: ArgType;
+
+        fn get_item(self) -> ProgramBuilderItem<'a, Self::Ty, Self::Expr>;
+
+        fn as_string(self) -> VarString {
+            self.get_item().item.data.into_inner()
+        }
+    }
+
+    unsafe impl<'a, T: ArgType, E: ExprType> ItemType<'a> for ProgramBuilderItem<'a, T, E> {
+        type Expr = E;
+        type Ty = T;
+
+        #[inline(always)]
+        fn get_item(self) -> Self {
+            self
+        }
+    }
+
+    unsafe impl<'a, T: ArgType, E: ExprType> ItemType<'a> for &'a ProgramBuilderItem<'a, T, E> {
+        type Expr = E;
+        type Ty = T;
+
+        #[inline(always)]
+        fn get_item(self) -> ProgramBuilderItem<'a, T, E> {
+            self.clone()
+        }
+    }
+
     macro_rules! impl_shader_args {
-		// a macro could be implemented that counts the number of arguments
-		// that are passed to this macro, but that would be pretty unneccesary
 		($($name:ident),*; $num:expr) => (
             #[allow(unused_parens)]
 			unsafe impl<$($name: ArgType),*> ShaderArgs for ($($name,)*) {
 				const NARGS: usize = $num;
 
-				unsafe fn create(prefix: &'static str) -> Self {
-					let n = 0;
-					$(
-						let $name = $name::create(VarString::new(format!("{}{}", prefix, n)), ItemRef::Static);
-						let n = n + 1;
-					)*
-					($($name,)*)
-				}
-
-                type AsUniform = ($(Uniform<$name>),*);
-
-                type AsVarying = ($(Varying<$name>),*);
-
-                unsafe fn as_uniform(self, scope: ScopeGaurd) -> Self::AsUniform {
-                    let ($($name,)*) = self;
-                    ($(Uniform::from_t($name, scope.clone())),*)
+                fn map_args() -> Vec<DataType> {
+                    vec![$($name::data_type()),*]
                 }
-
-                unsafe fn as_varying(self, scope: ScopeGaurd) -> Self::AsVarying {
-                    let ($($name,)*) = self;
-                    ($(Varying::from_t($name, scope.clone())),*)
-                }
-
-				fn map_args() -> ShaderArgList {
-					ShaderArgList {
-						args: vec![$($name::data_type()),*],
-					}
-				}
-
-				fn map_data_args(self) -> ShaderArgDataList {
-					let ($($name,)*) = self;
-					ShaderArgDataList {
-						args: vec![$(($name::data_type(), $name.as_shader_data())),*]
-					}
-				}
 			}
 
-            impl<$($name: IntoArg),*> IntoArgs for ($($name),*) {
-                type Args = ($($name::Arg,)*);
+            unsafe impl<'a, $($name: ItemType<'a>),*> WrappedShaderArgs<'a> for
+                ($($name,)*) where ($($name::Expr),*): ExprMin {
+                type Inner = ($($name::Ty,)*);
+                type Min = <($($name::Expr),*) as ExprMin>::Min;
 
-                unsafe fn into_args(self) -> (Self::Args, ScopeGaurd) {
-                    let ($($name),*) = self;
-                    let mut scope = ScopeGaurd::Free;
-                    // I want to take a moment to thank Rust for allowing this
-                    // type of syntax
-                    (($({
-                        let x = $name.into_arg();
-                        scope = scope.merge(x.1);
-                        x.0
-                    },)*), scope)
+                fn get_strings(self, prefix: &str, b: &mut VarBuilder) -> String {
+                    let ($($name,)*) = self;
+                    let ($($name,)*) = ($(b.format_var(&$name.as_string()),)*);
+
+                    let mut i = 0;
+                    let s = format!("");
+                    $(
+                        let s = format!("{}   {}{} = {};\n", s, prefix, i, $name);
+                        i += 1;
+                    )*
+                    s
+                }
+            }
+
+            unsafe impl<'a, E: ExprType + 'a, $($name: ArgType + 'a),*> IntoWrapped<'a, E> for ($($name,)*)
+            where
+                ($(ProgramBuilderItem<'a, $name, E>,)*): WrappedShaderArgs<'a>,
+            {
+                type Wrapped = ($(ProgramBuilderItem<'a, $name, E>),*);
+
+                unsafe fn into_wrapped(prefix: &str) -> Self::Wrapped {
+                    let mut i = 0;
+                    ($({
+                        // this doesn't need to reference $name at all,
+                        // but if this wasn't here then it wouldn't know
+                        // how many times to repeat the expression
+                        let _ = stringify!($name);
+                        let x = ProgramBuilderItem::create(VarString::new(format!("{}{}", prefix, i)), Static);
+                        i += 1;
+                        x
+                    }),*)
                 }
             }
 
             unsafe impl<T: ArgClass, $($name: ArgType + ArgParameter<T>),*> ShaderArgsClass<T> for ($($name,)*) {
                 fn get_param(i: usize) -> T {
                     // note: create an array of function pointers and call the ith one
-                    // this is likely faster and more optimizable.
+                    // this is likely faster and more optimizable than some alternatives
                     let a: [fn() -> T; $num] = [$($name::get_param),*];
                     (a[i])()
                 }
@@ -1828,49 +1529,141 @@ pub mod traits {
 }
 
 pub mod vec {
-    pub unsafe trait VecLen {
+    use super::traits::*;
+    use super::ItemRef::*;
+    use super::{DataType, PrimType, VarBuilder};
+    use super::{ProgramBuilderItem, VarString};
+    use crate::tuple::RemoveFront;
+    use std::marker::PhantomData;
+    use std::ops::{Add, Div, Mul, Sub};
+
+    pub unsafe trait VecLen: 'static {
+        const LEN: usize;
         type Next;
         type Prev;
     }
 
-    pub unsafe trait VecType {
+    pub unsafe trait VecType: 'static {
+        const PTYPE: PrimType;
         type From: Copy;
     }
 
-    pub struct Vec<T: VecType, L: VecLen> {
+    pub struct GlVec<T: VecType, L: VecLen> {
         phantom: PhantomData<(T, L)>,
     }
 
-    pub struct Float {
+    impl<T: VecType, L: VecLen> Clone for GlVec<T, L> {
+        fn clone(&self) -> Self {
+            GlVec {
+                phantom: PhantomData,
+            }
+        }
+    }
+
+    unsafe impl<T: VecType, L: VecLen> ArgParameter<TransparentArgs> for GlVec<T, L> {
+        fn get_param() -> TransparentArgs {
+            TransparentArgs {
+                num_locations: 1,
+                num_input_locations: 1,
+            }
+        }
+    }
+
+    unsafe impl<L: VecLen> ArgParameter<OutputArgs> for GlVec<VecFloat, L> {
+        fn get_param() -> OutputArgs {
+            OutputArgs
+        }
+    }
+
+    unsafe impl<L: VecLen> ArgParameter<OutputArgs> for GlVec<VecInt, L> {
+        fn get_param() -> OutputArgs {
+            OutputArgs
+        }
+    }
+
+    unsafe impl<L: VecLen> ArgParameter<OutputArgs> for GlVec<VecUInt, L> {
+        fn get_param() -> OutputArgs {
+            OutputArgs
+        }
+    }
+
+    macro_rules! vec_litteral {
+        ($t:ty, $l:ty, $($c:ty),*; $($place:ident),*) => (
+            impl Construct<'static, GlVec<$t, $l>, Constant> for ($($c),*) {
+                fn construct(self) -> ProgramBuilderItem<'static, GlVec<$t, $l>, Constant> {
+                    let ($($place),*) = self;
+                    let s = format!("{}(", <GlVec<$t, $l>>::data_type().gl_type());
+                    $(
+                        let s = format!("{}{}, ", s, $place);
+                    )*
+                    // remove the trailing comma
+                    let s = format!("{})", &s[..s.len()-2]);
+                    ProgramBuilderItem::create(VarString::new(s), Static)
+                }
+            }
+        )
+    }
+
+    macro_rules! vec_litterals {
+        ($($t:ty, $c:ty),*) => (
+            $(
+                vec_litteral!($t, Vec1, $c; U1);
+                vec_litteral!($t, Vec2, $c; U1);
+                vec_litteral!($t, Vec3, $c; U1);
+                vec_litteral!($t, Vec4, $c; U1);
+                vec_litteral!($t, Vec2, $c, $c; U1, U2);
+                vec_litteral!($t, Vec3, $c, $c, $c; U1, U2, U3);
+                vec_litteral!($t, Vec4, $c, $c, $c, $c; U1, U2, U3, U4);
+            )*
+        )
+    }
+
+    vec_litterals!(VecFloat, f32, VecInt, i32, VecUInt, u32, VecBoolean, bool);
+
+    #[derive(Clone, Copy)]
+    pub struct VecFloat {
         _hidden: (),
     }
 
-    pub struct Int {
+    #[derive(Clone, Copy)]
+    pub struct VecInt {
         _hidden: (),
     }
 
-    pub struct UInt {
+    #[derive(Clone, Copy)]
+    pub struct VecUInt {
         _hidden: (),
     }
 
-    pub struct Boolean {
+    #[derive(Clone, Copy)]
+    pub struct VecBoolean {
         _hidden: (),
     }
 
-    unsafe impl VecType for Float {
+    unsafe impl VecType for VecFloat {
+        const PTYPE: PrimType = PrimType::Float;
         type From = f32;
     }
 
-    unsafe impl VecType for Int {
+    unsafe impl VecType for VecInt {
+        const PTYPE: PrimType = PrimType::Int;
         type From = i32;
     }
 
-    unsafe impl VecType for UInt {
+    unsafe impl VecType for VecUInt {
+        const PTYPE: PrimType = PrimType::UInt;
         type From = u32;
     }
 
-    unsafe impl VecType for Boolean {
+    unsafe impl VecType for VecBoolean {
+        const PTYPE: PrimType = PrimType::Boolean;
         type From = u32;
+    }
+
+    unsafe impl<T: VecType, L: VecLen> ArgType for GlVec<T, L> {
+        fn data_type() -> DataType {
+            DataType::Vec(T::PTYPE, L::LEN as u8)
+        }
     }
 
     pub struct Vec0;
@@ -1884,35 +1677,139 @@ pub mod vec {
     pub struct Vec4;
 
     unsafe impl VecLen for Vec1 {
+        const LEN: usize = 1;
         type Next = Vec2;
         type Prev = Vec0;
     }
 
     unsafe impl VecLen for Vec2 {
+        const LEN: usize = 2;
         type Next = Vec3;
         type Prev = Vec1;
     }
 
     unsafe impl VecLen for Vec3 {
+        const LEN: usize = 3;
         type Next = Vec4;
         type Prev = Vec2;
     }
 
     unsafe impl VecLen for Vec4 {
+        const LEN: usize = 4;
         type Next = ();
         type Prev = Vec3;
     }
 
     pub unsafe trait Maybe0VecLen {
+        const LEN: usize;
         type Next;
     }
 
     unsafe impl Maybe0VecLen for Vec0 {
+        const LEN: usize = 0;
         type Next = Vec1;
     }
 
     unsafe impl<T: VecLen> Maybe0VecLen for T {
+        const LEN: usize = T::LEN;
         type Next = T::Next;
+    }
+
+    macro_rules! construct_vec {
+        ($len:ty, $($t:ty),*;$($place:ident),*) => (
+            impl<'a, T: VecType, $($place: ExprType),*>
+                Construct<'a, GlVec<T, $len>, <($($place,)*) as ExprMin>::Min> for
+                ($(ProgramBuilderItem<'a, GlVec<T, $t>, $place>),*)
+            where
+                ($($place,)*): ExprMin,
+            {
+                fn construct(self) ->
+                    ProgramBuilderItem<'a, GlVec<T, $len>, <($($place,)*) as ExprMin>::Min>
+                {
+                    let ($($place,)*) = self;
+                    let ($($place,)*) = ($($place.item.data.into_inner(),)*);
+                    let s = var_format!(
+                        format!("{}(", <GlVec<T, $len>>::data_type().gl_type()),
+                        $({let _ = stringify!($place); ", "}),*;
+                        $($place),*);
+                    // remove the trailing comma
+                    let s = s.substring(0, s.len()-2);
+                    let s = var_format!("", ")"; s);
+                    ProgramBuilderItem::create(s, Expr)
+                }
+            }
+        )
+    }
+
+    construct_vec!(Vec4, Vec1, Vec1, Vec1, Vec1; U1, U2, U3, U4);
+    construct_vec!(Vec4, Vec1, Vec1, Vec2; U1, U2, U3);
+    construct_vec!(Vec4, Vec1, Vec2, Vec1; U1, U2, U3);
+    construct_vec!(Vec4, Vec2, Vec1, Vec1; U1, U2, U3);
+    construct_vec!(Vec4, Vec1, Vec3; U1, U2);
+    construct_vec!(Vec4, Vec3, Vec1; U1, U2);
+    construct_vec!(Vec3, Vec1, Vec1, Vec1; U1, U2, U3);
+    construct_vec!(Vec3, Vec1, Vec2; U1, U2);
+    construct_vec!(Vec3, Vec2, Vec1; U1, U2);
+    construct_vec!(Vec2, Vec1, Vec1; U1, U2);
+
+    impl<T: VecType, L: VecLen> Add<GlVec<T, L>> for GlVec<T, L> {
+        type Output = GlVec<T, L>;
+
+        fn add(self, rhs: GlVec<T, L>) -> GlVec<T, L> {
+            // this implementation exists to generate an implementation
+            // for ProgramBuilderItems
+            unreachable!()
+        }
+    }
+
+    impl<T: VecType, L: VecLen> Sub<GlVec<T, L>> for GlVec<T, L> {
+        type Output = GlVec<T, L>;
+
+        fn sub(self, rhs: GlVec<T, L>) -> GlVec<T, L> {
+            unreachable!()
+        }
+    }
+
+    impl<T: VecType, L: VecLen> Mul<GlVec<T, L>> for GlVec<T, Vec1> {
+        type Output = GlVec<T, L>;
+
+        fn mul(self, rhs: GlVec<T, L>) -> GlVec<T, L> {
+            unreachable!()
+        }
+    }
+
+    impl<T: VecType, L: VecLen> Div<GlVec<T, Vec1>> for GlVec<T, L> {
+        type Output = GlVec<T, L>;
+
+        fn div(self, rhs: GlVec<T, Vec1>) -> GlVec<T, L> {
+            unreachable!()
+        }
+    }
+
+    // annoying redundant implementations to avoid implementation conflicts
+
+    impl<T: VecType> Mul<GlVec<T, Vec1>> for GlVec<T, Vec2> {
+        type Output = GlVec<T, Vec2>;
+
+        fn mul(self, rhs: GlVec<T, Vec1>) -> GlVec<T, Vec2> {
+            unreachable!()
+        }
+    }
+
+    impl<T: VecType> Mul<GlVec<T, Vec1>> for GlVec<T, Vec3> {
+        type Output = GlVec<T, Vec3>;
+
+        fn mul(self, rhs: GlVec<T, Vec1>) -> GlVec<T, Vec3> {
+            unreachable!()
+        }
+    }
+
+    impl<T: VecType> Mul<GlVec<T, Vec1>> for GlVec<T, Vec4> {
+        type Output = GlVec<T, Vec4>;
+
+        fn mul(self, rhs: GlVec<T, Vec1>) -> GlVec<T, Vec4> {
+            unreachable!()
+        }
     }
 
     pub unsafe trait MapFor<T: VecType, L: VecLen> {
@@ -1997,6 +1894,40 @@ pub mod vec {
     }
 }
 
+impl<'a, T: VecType, L: VecLen, E: ExprType> Construct<'a, GlVec<T, L>, E>
+    for ProgramBuilderItem<'a, GlVec<T, Vec1>, E>
+where
+    GlVec<T, L>: ArgType,
+{
+    fn construct(self) -> ProgramBuilderItem<'a, GlVec<T, L>, E> {
+        let s = var_format!(
+            format!("{}(", <GlVec<T, L>>::data_type().gl_type()), ")";
+            self.item.data.into_inner());
+        ProgramBuilderItem::create(s, Expr)
+    }
+}
+
+impl<'a, T: VecType, L: VecLen, E: ExprType> ProgramBuilderItem<'a, GlVec<T, L>, E> {
+    pub fn map<M: MapFor<T, L>>(self) -> ProgramBuilderItem<'a, GlVec<T, M::L_Out>, E>
+    where
+        M::L_Out: VecLen,
+    {
+        if !cfg!(feature = "opengl42") && L::LEN == 1 {
+            let s = var_format!(format!("{}(", <GlVec<T, L>>::data_type().gl_type()), ")"; self.as_string());
+            ProgramBuilderItem::create(s, Expr)
+        } else {
+            let s = var_format!("", format!(".{}", M::get_str()); self.as_string());
+            ProgramBuilderItem::create(s, Expr)
+        }
+    }
+}
+
+pub fn construct<'a, T: ArgType, E: ExprType, C: Construct<'a, T, E>>(
+    c: C,
+) -> ProgramBuilderItem<'a, T, E> {
+    c.construct()
+}
+
 #[derive(Clone, Copy)]
 pub enum ItemRef {
     // used for variable names and shader inputs
@@ -2072,320 +2003,10 @@ impl Clone for ProgramItem {
     }
 }
 
-// the complement of implementations for certain vec ops. Need to
-// be careful not to redefine.
-macro_rules! vec_ops_reverse {
-    ($vec_type:ident, $s0:ident,) => ();
-    ($vec_type:ident, $s0:ident, $($sub:ident,)+) => (
-        impl Mul<last!($($sub,)*)> for $vec_type {
-            type Output = $vec_type;
-
-            fn mul(self, rhs: last!($($sub,)*)) -> $vec_type {
-                let (l, r) = (self.data.data.into_inner(), rhs.data.data.into_inner());
-                $vec_type::new(var_format!("(", " * ", ")"; l, r), Expr)
-            }
-        }
-    )
-}
-
-macro_rules! vec_type {
-    ($vec:ident, $vec_type:ident, $trait:ident, $data:expr, $($sub:ident,)*) => (
-    	#[derive(Clone)]
-        pub struct $vec_type {
-            data: ProgramItem,
-        }
-
-        impl $vec_type {
-            fn new(data: VarString, r: ItemRef) -> $vec_type {
-                $vec_type {
-                    data: ProgramItem::new(data, $data, r),
-                }
-            }
-        }
-
-        impl Mul<$vec_type> for last!($($sub,)*) {
-            type Output = $vec_type;
-
-            fn mul(self, rhs: $vec_type) -> $vec_type {
-                let (l, r) = (self.data.data.into_inner(), rhs.data.data.into_inner());
-                $vec_type::new(var_format!("(", " * ", ")"; l, r), Expr)
-            }
-        }
-
-        impl Div<last!($($sub,)*)> for $vec_type {
-            type Output = $vec_type;
-
-            fn div(self, rhs: last!($($sub,)*)) -> $vec_type {
-                let (l, r) = (self.data.data.into_inner(), rhs.data.data.into_inner());
-                $vec_type::new(var_format!("(", " / ", ")"; l, r), Expr)
-            }
-        }
-
-        vec_ops_reverse!($vec_type, $($sub,)*);
-
-        impl Add for $vec_type {
-        	type Output = $vec_type;
-
-        	fn add(self, rhs: $vec_type) -> $vec_type {
-        		let (l, r) = (self.data.data.into_inner(), rhs.data.data.into_inner());
-                $vec_type::new(var_format!("(", " + ", ")"; l, r), Expr)
-        	}
-        }
-
-        pub unsafe trait $trait {
-            type Out: ExprType<$vec_type>;
-
-            fn $vec(self) -> Self::Out;
-        }
-
-        unsafe impl<T: ShaderArgs + Construct<$vec_type>, S: IntoArgs<Args = T> + ExprMin<$vec_type>> $trait for S {
-            type Out = S::Min;
-
-            fn $vec(self) -> Self::Out {
-                unsafe {
-                    let (t, scope) = self.into_args();
-                    S::Min::from_t(t.as_arg(), scope)
-                }
-            }
-        }
-
-        pub fn $vec<T: $trait>(args: T) -> T::Out {
-        	args.$vec()
-        }
-
-        unsafe impl ArgType for $vec_type {
-        	unsafe fn create(data: VarString, r: ItemRef) -> $vec_type {
-        		$vec_type {
-        			data: ProgramItem {
-                        data: Cell::new(data),
-                        ref_type: Cell::new(r),
-                        ty: $data,
-                    }
-        		}
-        	}
-
-        	fn data_type() -> DataType {
-        		$data
-        	}
-
-        	fn as_shader_data(self) -> VarString {
-        		self.data.data.into_inner()
-        	}
-        }
-
-        unsafe impl ArgParameter<TransparentArgs> for $vec_type {
-            fn get_param() -> TransparentArgs {
-                TransparentArgs { num_input_locations: 1, num_locations: 1 }
-            }
-        }
-
-        subs!($trait, $vec, $vec_type ;  ; $($sub,)*);
-    )
-}
-
-macro_rules! subs {
-	($trait:ident, $vec:ident, $vec_type:ident;$($start:ident,)*;) => (
-		unsafe impl Construct<$vec_type> for ($($start),*) {
-            #[allow(unused_parens)]
-			fn as_arg(self) -> $vec_type {
-				match_from!(self, $($start,)*;u1, u2, u3, u4,;);
-                $vec_type::new(var_format!("", "(", ")"; VarString::new($vec_type::data_type().gl_type()),
-                        concat_enough!($($start,)* ; u1, u2, u3, u4,;)), Expr)
-			}
-		}
-	);
-	($trait:ident, $vec:ident, $vec_type:ident ; $($start:ident,)* ; $t0:ident, $($types:ident,)*) => (
-		subs!($trait, $vec, $vec_type;$($start,)*$t0,;);
-		subs_reverse!($trait, $vec, $vec_type;$($start,)*;;$($types,)*;$($types,)*);
-	)
-}
-
-macro_rules! match_from {
-	($var:ident, ; $($vals:ident,)* ; $($build:ident,)*) => (
-		let ($($build),*) = $var;
-	);
-	($var:ident, $t1:ident, $($try:ident,)* ; $v1:ident, $($vals:ident,)* ; $($build:ident,)*) => (
-		match_from!($var, $($try,)* ; $($vals,)* ; $($build,)*$v1,);
-	)
-}
-
-macro_rules! concat_enough {
-	(; $($vals:ident,)* ; $($build:ident,)*) => (
-		concat_var!($($build.as_shader_data(),)*);
-	);
-	($t1:ident, $($try:ident,)* ; $v1:ident, $($vals:ident,)* ; $($build:ident,)*) => (
-		concat_enough!($($try,)* ; $($vals,)* ; $($build,)*$v1,);
-	)
-}
-
-macro_rules! concat_var {
-    ($e:expr,) => (
-        $e
-    );
-    ($e:expr, $($es:expr,)+) => (
-        var_format!("", ", ", ""; $e, concat_var!($($es,)+))
-    );
-}
-
-macro_rules! concat {
-	($e:expr,) => (
-		$e
-	);
-	($e:expr, $($es:expr,)+) => (
-		format!("{}, {}", $e, concat!($($es,)+))
-	);
-}
-
-// subs_repeat needs both a forward and backward list of types,
-// so this macro generates those and passes it to subs_repeat
-macro_rules! subs_reverse {
-    ($trait:ident, $vec:ident, $vec_type:ident;$($start:ident,)*;$($rev:ident,)*;;$($ct:ident,)*) => (
-        subs_repeat!($trait, $vec, $vec_type;$($start,)*;$($rev,)*;$($ct,)*);
-    );
-    ($trait:ident, $vec:ident, $vec_type:ident;$($start:ident,)*;
-		$($rev:ident,)*;$t0:ident, $($types:ident,)*; $($ct:ident,)*) => (
-        subs_reverse!($trait, $vec, $vec_type;$($start,)*;$t0,$($rev,)*;$($types,)*;$($ct,)*);
-    );
-}
-
-macro_rules! subs_repeat {
-	($trait:ident, $vec:ident, $vec_type:ident;$($start:ident,)*;;) => ();
-	($trait:ident, $vec:ident, $vec_type:ident;$($start:ident,)*;$r0:ident, $($rev:ident,)*;$t0:ident, $($types:ident,)*) => (
-		subs!($trait, $vec, $vec_type;$($start,)*$r0,;$t0,$($types,)*);
-		subs_repeat!($trait, $vec, $vec_type;$($start,)*;$($rev,)*;$($types,)*);
-	)
-}
-
-macro_rules! vec_types {
-	(;;) => ();
-	($t0:ident, $($type:ident,)*;$f0:ident, $($fn:ident,)*;$a0:ident, $($arg:ident,)*) => (
-		vec_type!($f0, $t0, $a0, DataType::$t0, $t0, $($type,)*);
-
-		vec_types!($($type,)*;$($fn,)*;$($arg,)*);
-	)
-}
-
-macro_rules! vec_swizzle {
-	($($types:ident),*) => (
-		vec_swizzle!($($types,)*;$($types,)*;Vec4, Vec3, Vec2, Vec1,);
-	);
-    ($vec:ident,;$($types:ident,)*;$sz:ident,) => (
-        #[cfg(feature = "opengl42")]
-        impl<E: ExprType<$vec>> Map<$vec,$($types,)*swizzle::$sz> for E {
-            /// Applies a swizzle mask to the vector type.
-            fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(&self, _mask: T) -> <Self as ExprCombine<T::Out>>::Min
-            where Self: ExprCombine<T::Out> {
-                unsafe {
-                    let (t, scope) = self.clone().into_t();
-                    <Self as ExprCombine<T::Out>>::Min::from_t(
-                        T::Out::create(var_format!("", ".", ""; t.data.data.into_inner(), VarString::new(T::get_vars())), Expr),
-                        scope,
-                    )
-                }
-            }
-        }
-
-        #[cfg(not(feature = "opengl42"))]
-        impl<E: ExprType<$vec>> Map<$vec,$($types,)*swizzle::$sz> for E {
-            /// Applies a swizzle mask to the vector type.
-            fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(&self, _mask: T) -> <Self as ExprCombine<T::Out>>::Min
-            where Self: ExprCombine<T::Out> {
-                unsafe {
-                    let (t, scope) = self.clone().into_t();
-                    // convieniently, opengl allows syntax like `vec4(1.0)`
-                    <Self as ExprCombine<T::Out>>::Min::from_t(
-                        T::Out::create(var_format!("", "(", ")"; T::Out::data_type(), t.data.data.into_inner(), Expr),
-                        scope,
-                    ))
-                }
-            }
-        }
-    );
-	($vec:ident, $($next:ident,)+;$($types:ident,)*;$sz:ident, $($s:ident,)*) => (
-		impl<E: ExprType<$vec>> Map<$vec,$($types,)*swizzle::$sz> for E {
-            /// Applies a swizzle mask to the vector type.
-			fn map<T: SwizzleMask<$($types,)*swizzle::$sz>>(&self, _mask: T) -> <Self as ExprCombine<T::Out>>::Min
-            where Self: ExprCombine<T::Out> {
-                unsafe {
-                    let (t, scope) = self.clone().into_t();
-    				<Self as ExprCombine<T::Out>>::Min::from_t(
-    					T::Out::create(var_format!("", ".", ""; t.data.data.into_inner(), VarString::new(T::get_vars())), Expr),
-                        scope
-    				)
-                }
-			}
-		}
-
-		vec_swizzle!($($next,)*;$($types,)*;$($s,)*);
-	);
-}
-
-macro_rules! vec_litteral {
-    ($tag:expr, $t:ty, $($arg:ident),*;$($f:ident),*;$($v:ident),*) => (
-        vec_litteral!($tag, $($t, $arg, $f, $v,)*);
-    );
-    ($tag:expr,) => ();
-    ($tag:expr, $t0:ty, $a0:ident, $f0:ident, $v0:ident, $($t:ty, $arg:ident, $f:ident, $v:ident,)*) => (
-        unsafe impl $a0 for tup!($t0,$($t,)*) {
-            type Out = Constant<$v0>;
-
-            #[allow(unused_parens)]
-            fn $f0(self) -> Constant<$v0> {
-                let tup!($f0,$($f,)*) = self;
-                Constant {
-                    arg: $v0::new(var_format!("", "(", ")"; VarString::new($v0::data_type().gl_type()),
-                        VarString::new(concat!(format!("{}{}", $f0, $tag),$(format!("{}{}", $f, $tag),)*))), Expr),
-                    scope: ScopeGaurd::Free,
-                }
-            }
-        }
-
-        vec_litteral!($tag, $($t, $arg, $f, $v,)*);
-    )
-}
-
-macro_rules! tup {
-    ($($t:ident,)*) => (
-        ($($t),*)
-    );
-    ($($t:ty,)*) => (
-        ($($t),*)
-    )
-}
-
-macro_rules! last {
-    ($arg:ident,) => (
-        $arg
-    );
-    ($a0:ident, $($args:ident,)+) => (
-        last!($($args,)*)
-    )
-}
-
-macro_rules! create_vec {
-    ($ty:ty, $suffix:expr, $($obj:ident),*; $($func:ident),*; $($arg:ident),*) => {
-        vec_types!($($obj,)*;$($func,)*;$($arg,)*);
-        vec_swizzle!($($obj),*);
-        vec_litteral!($suffix, $ty, $($arg),*;$($func),*;$($obj),*);
-    }
-}
-
-macro_rules! vec_output {
-    ($($vec_type:ident),*) => (
-        $(
-            unsafe impl ArgParameter<OutputArgs> for $vec_type {
-                fn get_param() -> OutputArgs {
-                    OutputArgs
-                }
-            }
-        )*
-    )
-}
-
 macro_rules! vec_uniform {
-    ($($vec_type:ident, $func:ident, $n:expr;)*) => (
+    ($($vec_type:ident, $vec_len:ty, $func:ident, $n:expr;)*) => (
         $(
-            unsafe impl ArgParameter<UniformArgs> for $vec_type {
+            unsafe impl ArgParameter<UniformArgs> for GlVec<$vec_type, $vec_len> {
                 fn get_param() -> UniformArgs {
                     UniformArgs {
                         num_elements: $n,
@@ -2399,136 +2020,86 @@ macro_rules! vec_uniform {
     );
 }
 
-create_vec!(f32, "", Float4, Float3, Float2, Float;
-    float4, float3, float2, float;
-    Float4Arg, Float3Arg, Float2Arg, FloatArg);
-
-create_vec!(i32, "", Int4, Int3, Int2, Int;
-    int4, int3, int2, int;
-    Int4Arg, Int3Arg, Int2Arg, IntArg);
-
-create_vec!(u32, "", UInt4, UInt3, UInt2, UInt;
-    uint4, uint3, uint2, uint;
-    UInt4Arg, UInt3Arg, UInt2Arg, UIntArg);
-
-vec_output!(Float4, Float3, Float2, Float, Int4, Int3, Int2, Int, UInt4, UInt3, UInt2, UInt);
-
-create_vec!(bool, "", Boolean4, Boolean3, Boolean2, Boolean;
-    boolean4, boolean3, boolean2, boolean;
-    Bool4Arg,  Bool3Arg, Bool2Arg, BoolArg);
-
 vec_uniform!(
-    Float4, Uniform4fv, 4;
-    Float3, Uniform3fv, 3;
-    Float2, Uniform2fv, 2;
-    Float, Uniform1fv, 1;
-    Int4, Uniform4iv, 4;
-    Int3, Uniform4iv, 3;
-    Int2, Uniform4iv, 2;
-    Int, Uniform4iv, 1;
-    UInt4, Uniform4uiv, 4;
-    UInt3, Uniform4uiv, 3;
-    UInt2, Uniform4uiv, 2;
-    UInt, Uniform4uiv, 1;
+    VecFloat, Vec4, Uniform4fv, 4;
+    VecFloat, Vec3, Uniform3fv, 3;
+    VecFloat, Vec2, Uniform2fv, 2;
+    VecFloat, Vec1, Uniform1fv, 1;
+    VecInt, Vec4, Uniform4iv, 4;
+    VecInt, Vec3, Uniform4iv, 3;
+    VecInt, Vec2, Uniform4iv, 2;
+    VecInt, Vec1, Uniform4iv, 1;
+    VecUInt, Vec4, Uniform4uiv, 4;
+    VecUInt, Vec3, Uniform4uiv, 3;
+    VecUInt, Vec2, Uniform4uiv, 2;
+    VecUInt, Vec1, Uniform4uiv, 1;
 );
 
 macro_rules! impl_matrix {
-    ($matrix_type:ident, $matrix_fn:ident, $data:expr, $trait:ident) => (
+    ($matrix_type:ident, $data:expr) => {
         #[derive(Clone)]
         pub struct $matrix_type {
-            data: ProgramItem,
-        }
-
-        impl $matrix_type {
-            fn new(data: VarString, r: ItemRef) -> $matrix_type {
-                $matrix_type {
-                    data: ProgramItem::new(data, $data, r),
-                }
-            }
-        }
-
-        pub fn $matrix_fn<T: $trait>(t: T) -> T::Out {
-            t.$matrix_fn()
+            _hidden: (),
         }
 
         impl Add<$matrix_type> for $matrix_type {
             type Output = $matrix_type;
 
             fn add(self, rhs: $matrix_type) -> $matrix_type {
-                let (l, r) = (self.data.data.into_inner(), rhs.data.data.into_inner());
-                $matrix_type::new(var_format!("(", " + ", ")"; l, r), Expr)
-            }
-        }
-
-        pub unsafe trait $trait {
-            type Out: ExprType<$matrix_type>;
-
-            fn $matrix_fn(self) -> Self::Out;
-        }
-
-        unsafe impl<T: ShaderArgs + Construct<$matrix_type>, S: IntoArgs<Args = T> + ExprMin<$matrix_type>> $trait for S {
-            type Out = S::Min;
-
-            fn $matrix_fn(self) -> Self::Out {
-                unsafe {
-                    let (args, scope) = self.into_args();
-                    S::Min::from_t(args.as_arg(), scope)
-                }
+                unreachable!();
             }
         }
 
         unsafe impl ArgType for $matrix_type {
-            unsafe fn create(data: VarString, r: ItemRef) -> $matrix_type {
-                $matrix_type {
-                    data: ProgramItem {
-                        data: Cell::new(data),
-                        ref_type: Cell::new(r),
-                        ty: $data,
-                    }
-                }
-            }
-
             fn data_type() -> DataType {
                 $data
             }
-
-            fn as_shader_data(self) -> VarString {
-                self.data.data.into_inner()
-            }
         }
-    )
+    };
 }
 
 macro_rules! matrix_subs {
     ($($vec:ident, $m1:ident, $m2:ident, $m3:ident,;)*) => (
         $(
-            matrix_subs!($m1, $vec, $vec, $vec, $vec,);
-            matrix_subs!($m2, $vec, $vec, $vec,);
-            matrix_subs!($m3, $vec, $vec,);
+            matrix_subs!($m1, $vec, U1, U2, U3, U4);
+            matrix_subs!($m2, $vec, U1, U2, U3);
+            matrix_subs!($m3, $vec, U1, U2);
         )*
     );
-    ($mat_type:ident, $($vecs:ident,)*) => (
-        unsafe impl Construct<$mat_type> for ($($vecs),*) {
-            fn as_arg(self) -> $mat_type {
-                match_from!(self, $($vecs,)*;u1, u2, u3, u4,;);
-                $mat_type::new(var_format!("", "(", ")"; VarString::new($mat_type::data_type().gl_type()),
-                        concat_enough!($($vecs,)* ; u1, u2, u3, u4,;)), Expr)
+    ($mat_type:ident, $vec:ty, $($num:ident),*) => (
+        impl<'a, $($num: ItemType<'a, Ty = $vec>),*>
+            Construct<'a, $mat_type, <($($num,)*) as ExprMin>::Min> for ($($num,)*)
+        where
+            ($($num,)*): ExprMin,
+        {
+            fn construct(self) -> ProgramBuilderItem<'a, $mat_type, <($($num,)*) as ExprMin>::Min> {
+                let ($($num,)*) = self;
+                let ($($num,)*) = ($($num.as_string(),)*);
+                let s = var_format!(
+                    format!("{}(", $mat_type::data_type().gl_type()),
+                    // hack to allow the macro to repeat the expression
+                    $({let _ = stringify!($num); ","}),*;
+                    $($num),*
+                );
+                // remove the trailing comma
+                let s = s.substring(0, s.len()-2);
+                let s = var_format!("", ")"; s);
+                ProgramBuilderItem::create(s, Expr)
             }
         }
     )
 }
 
 macro_rules! arg_op {
-    ($op:ident, $op_fn:ident, $t1:ident, $t2:ident, $out:ident) => (
+    ($op:ident, $op_fn:ident, $t1:ident, $t2:ident, $out:ident) => {
         impl $op<$t2> for $t1 {
             type Output = $out;
 
             fn $op_fn(self, rhs: $t2) -> $out {
-                let (l, r) = (self.data.data.into_inner(), rhs.data.data.into_inner());
-                $out::new(var_format!("(", " * ", ")"; l, r), Expr)
+                unreachable!()
             }
         }
-    )
+    };
 }
 
 macro_rules! mat_ops {
@@ -2571,7 +2142,7 @@ macro_rules! matrix_param {
 }
 
 macro_rules! create_matrix {
-    ($t:ident, $($vec:ident, $($mat:ident, $mat_fn:ident, $trait:ident,)*;)*) => (
+    ($t:ident, $($vec:ident, $($mat:ident,)*;)*) => (
         matrix_subs!($($vec, $($mat,)*;)*);
         mat_ops!($($($mat,)*;)* | $($($mat,)*;)*);
         mat_ops!(!$($vec,)*;$($vec,)*;$($($mat,)*;)*);
@@ -2581,7 +2152,7 @@ macro_rules! create_matrix {
             $(
                 arg_op!(Mul, mul, $t, $mat, $mat);
                 arg_op!(Mul, mul, $mat, $t, $mat);
-                impl_matrix!($mat, $mat_fn, DataType::$mat, $trait);
+                impl_matrix!($mat, DataType::$mat);
             )*
         )*
     )
@@ -2605,9 +2176,9 @@ macro_rules! mat_uniform {
 }
 
 create_matrix!(Float,
-    Float4, Float4x4, mat4x4, Mat4x4Arg, Float3x4, mat3x4, Mat3x4Arg, Float2x4, mat2x4, Mat2x4Arg,;
-    Float3, Float4x3, mat4x3, Mat4x3Arg, Float3x3, mat3x3, Mat3x3Arg, Float2x3, mat2x3, Mat2x3Arg,;
-    Float2, Float4x2, mat4x2, Mat4x2Arg, Float3x2, mat3x2, Mat3x2Arg, Float2x2, mat2x2, Mat2x2Arg,;);
+    Float4, Float4x4, Float3x4, Float2x4,;
+    Float3, Float4x3, Float3x3, Float2x3,;
+    Float2, Float4x2, Float3x2, Float2x2,;);
 
 mat_uniform!(
     Float4x4, UniformMatrix4fv, 16;

@@ -1,6 +1,6 @@
 use super::gl;
 use super::gl::Gl;
-use super::shader::{traits::ShaderArgs, Float4};
+use super::shader::{api::Float4, traits::ShaderArgs};
 
 pub unsafe trait RenderTarget<T: ShaderArgs> {
     /// Offscreen targets allow rendering to the currently active window, but rendering to a

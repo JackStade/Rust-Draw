@@ -4,6 +4,7 @@ use super::{inner_gl, inner_gl_unsafe, inner_gl_unsafe_static, GlDraw, GlDrawCor
 use gl::types::*;
 use gl::Gl;
 use shader::traits::*;
+use shader::ProgramBuilderItem;
 use std::marker::PhantomData;
 use std::{mem, ptr};
 
@@ -349,12 +350,13 @@ unsafe fn get_image(id: u32) -> GLuint {
     gl_draw.resource_list[id as usize]
 }
 
-pub fn texture<T: ExprType<S::Arg>, S: Sampler>(
-    sampler: Uniform<S>,
+pub fn texture<'a, T: ItemType<'a, Ty = <S::Ty as Sampler>::Arg>, S: ItemType<'a>>(
+    sampler: S,
     arg: T,
-) -> <(T, Uniform<S>) as ExprCombine<S::Out>>::Min
+) -> ProgramBuilderItem<'a, <S::Ty as Sampler>::Out, <(T::Expr, S::Expr) as ExprCombine>::Min>
 where
-    (T, Uniform<S>): ExprCombine<S::Out>,
+    S::Ty: Sampler,
+    (T::Expr, S::Expr): ExprCombine,
 {
     // the arguments to this function cannot come from a non-main thread
     let fmt_string = if unsafe { shader::SCOPE_DERIVS } {
@@ -362,17 +364,10 @@ where
     } else {
         "textureLod($, $, 0)"
     };
-    unsafe {
-        let (s, scope1) = arg.into_t();
-        let (a, scope2) = sampler.into_t();
-        <<(T, Uniform<S>) as ExprCombine<S::Out>>::Min>::from_t(
-            S::Out::create(
-                VarString::format(fmt_string, vec![s.as_shader_data(), a.as_shader_data()]),
-                ItemRef::Expr,
-            ),
-            scope1.merge(scope2),
-        )
-    }
+    ProgramBuilderItem::create(
+        VarString::format(fmt_string, vec![sampler.as_string(), arg.as_string()]),
+        ItemRef::Expr,
+    )
 }
 
 pub unsafe trait Sampler: ArgType {
@@ -382,24 +377,12 @@ pub unsafe trait Sampler: ArgType {
 
 macro_rules! sampler {
     ($sampler:ident, $data_ty:expr, $data:ty, $arg:ty) => {
-        #[derive(Clone)]
-        pub struct $sampler {
-            data: ProgramItem,
-        }
+        #[derive(Clone, Copy)]
+        pub struct $sampler {}
 
         unsafe impl ArgType for $sampler {
-            unsafe fn create(data: VarString, r: ItemRef) -> $sampler {
-                $sampler {
-                    data: ProgramItem::new(data, $data_ty, r),
-                }
-            }
-
             fn data_type() -> DataType {
                 $data_ty
-            }
-
-            fn as_shader_data(self) -> VarString {
-                self.data.into_inner()
             }
         }
 
@@ -416,8 +399,8 @@ macro_rules! sampler {
     };
 }
 
+use super::shader::api::*;
 use super::shader::{DataType, ItemRef, ProgramItem, VarString};
-use super::shader::{Float2, Float4, Int4, UInt4};
 
 sampler!(Sampler2D, DataType::Sampler2D, Float4, Float2);
 sampler!(IntSampler2D, DataType::IntSampler2D, Int4, Float2);

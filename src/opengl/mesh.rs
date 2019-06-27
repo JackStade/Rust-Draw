@@ -6,7 +6,7 @@ use crate::tuple::TupleIndex;
 use crate::tuple::{AttachFront, RemoveFront};
 use gl::types::*;
 use gl::Gl;
-use shader::{Float, Float2, Float3, Float4, Int, Int2, Int3, Int4, UInt, UInt2, UInt3, UInt4};
+use shader::api::*;
 use std::marker::PhantomData;
 
 use std::mem;
@@ -501,11 +501,7 @@ where
 
 pub mod uniform {
     use super::Gl;
-    use crate::opengl::shader::{
-        traits::*, Float, Float2, Float2x2, Float2x3, Float2x4, Float3, Float3x2, Float3x3,
-        Float3x4, Float4, Float4x2, Float4x3, Float4x4, Int, Int2, Int3, Int4, UInt, UInt2, UInt3,
-        UInt4,
-    };
+    use crate::opengl::shader::{api::*, traits::*};
     use crate::opengl::GlWindow;
     use crate::tuple::{AttachFront, RemoveFront, TupleIndex};
     use nalgebra as na;
