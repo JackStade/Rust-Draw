@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use self::traits::*;
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -182,10 +184,7 @@ impl VarString {
                 v.push((pos - start, var.clone()));
             }
         }
-        VarString {
-            string: s,
-            vars: v,
-        }
+        VarString { string: s, vars: v }
     }
 
     pub(crate) fn format(formatter: &str, strings: Vec<VarString>) -> VarString {
@@ -612,6 +611,7 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs> 
 
 use super::mesh::Mesh;
 use super::target::RenderTarget;
+use super::texture::ImageBindings;
 use super::DrawMode;
 use super::GlWindow;
 use render_options::RenderOptions;
@@ -619,7 +619,7 @@ use render_options::RenderOptions;
 impl<
         In: ShaderArgs,
         Uniforms: ShaderArgsClass<UniformArgs>,
-        Images: ShaderArgs,
+        Images: ShaderArgsClass<ImageArgs>,
         Out: ShaderArgs,
     > ShaderProgram<In, Uniforms, Images, Out>
 {
@@ -628,6 +628,7 @@ impl<
         _context: &GlWindow,
         mesh: &M,
         uniforms: &super::mesh::uniform::Uniforms<Uniforms>,
+        images: ImageBindings<Images>,
         target: &Target,
         draw: F,
         mode: DrawMode,
@@ -648,10 +649,16 @@ impl<
             let mut slice = &self.uniform_locations[..];
 
             uniforms.set_uniforms(gl, || {
-                let loc = 0;
+                let loc = slice[0];
                 slice = &slice[1..];
-                loc
+                loc as u32
             });
+
+            for i in 0..self.image_locations.len() {
+                gl.Uniform1i(self.image_locations[i], i as i32);
+            }
+
+            images.bind(gl);
 
             mesh.bind(gl);
 
@@ -766,7 +773,9 @@ pub fn build_program<T, F: FnOnce(ProgramBuilder) -> T>(f: F) -> T {
 // whether the current scope (from a shader compilation standpoint) has
 // implicit derivatives
 
-pub(crate) static mut SCOPE_DERIVS: bool = false;
+thread_local! {
+    pub(crate) static SCOPE_DERIVS: Cell<bool> = Cell::new(false);
+}
 
 /// Create a shader program with a vertex and a fragment shader.
 ///
@@ -803,8 +812,6 @@ where
         ShaderArgsClass<TransparentArgs> + ShaderArgsClass<OutputArgs> + IntoWrapped<'a, Varying>,
     Pass::Inner: ShaderArgsClass<TransparentArgs> + IntoWrapped<'a, Varying>,
 {
-
-    let v_scope = Rc::new(());
     let v_string = CString::new(create_shader_string::<
         In,
         Uniforms,
@@ -824,9 +831,7 @@ where
         false,
     ))
     .unwrap();
-    let _ = Rc::try_unwrap(v_scope).expect("A value was moved out of the vertex shader generator and stored elsewhere. This is not allowed because it could cause generation of an invalid shader.");
-    let f_scope = Rc::new(());
-
+    SCOPE_DERIVS.with(|x| x.set(true));
     let f_string = CString::new(create_shader_string::<
         Pass::Inner,
         Uniforms,
@@ -846,6 +851,7 @@ where
         true,
     ))
     .unwrap();
+    SCOPE_DERIVS.with(|x| x.set(false));
     let program = get_program(v_string.as_bytes_with_nul(), f_string.as_bytes_with_nul());
     let mut uniform_locations = vec![0; Uniforms::NARGS];
     let mut image_locations = vec![0; Images::NARGS];
@@ -1101,7 +1107,9 @@ use traits::*;
 use vec::*;
 
 pub mod api {
+    use super::traits::{Construct, ExprType};
     use super::vec;
+    use super::ProgramBuilderItem;
     use vec::GlVec;
     use vec::{Vec1, Vec2, Vec3, Vec4};
 
@@ -1132,8 +1140,44 @@ pub mod api {
     pub type FragOutputs<'a> = super::BuiltInFragOutputs<'a>;
     pub type VertOutputs<'a> = super::BuiltInVertOutputs<'a>;
 
+    macro_rules! named_construct {
+        ($t:ty, $name:ident) => {
+            pub fn $name<'a, E: ExprType, T: Construct<'a, $t, E>>(
+                t: T,
+            ) -> ProgramBuilderItem<'a, $t, E> {
+                super::construct(t)
+            }
+        };
+    }
+
+    named_construct!(Float, float);
+    named_construct!(Float2, float2);
+    named_construct!(Float3, float3);
+    named_construct!(Float4, float4);
+    named_construct!(Int, int);
+    named_construct!(Int2, int2);
+    named_construct!(Int3, int3);
+    named_construct!(Int4, int4);
+    named_construct!(UInt, uint);
+    named_construct!(UInt2, uint2);
+    named_construct!(UInt3, uint3);
+    named_construct!(UInt4, uint4);
+    named_construct!(Boolean, boolean);
+    named_construct!(Boolean2, boolean2);
+    named_construct!(Boolean3, boolean3);
+    named_construct!(Boolean4, boolean4);
+    named_construct!(Float4x4, float4x4);
+    named_construct!(Float4x3, float4x3);
+    named_construct!(Float4x2, float4x2);
+    named_construct!(Float3x4, float3x4);
+    named_construct!(Float3x3, float3x3);
+    named_construct!(Float3x2, float3x2);
+    named_construct!(Float2x4, float2x4);
+    named_construct!(Float2x3, float2x3);
+    named_construct!(Float2x2, float2x2);
+
     pub mod map {
-        pub use super::vec::{X, Y, Z, W};
+        pub use super::vec::{W, X, Y, Z};
     }
 }
 
@@ -1178,6 +1222,54 @@ macro_rules! item_ops {
             type Output = ProgramBuilderItem<'a, L::Output, <(E1, E2) as ExprCombine>::Min>;
 
             fn $op_fn(self, other: ProgramBuilderItem<'a, R, E1>) -> Self::Output {
+                ProgramBuilderItem::create(
+                    var_format!("(", $op_sym, ")"; self.as_string(), other.as_string()),
+                    Expr,
+                )
+            }
+        }
+
+        impl<'a, L: ArgType, R: ArgType, E1: ExprType, E2: ExprType> $op<ProgramBuilderItem<'a, R, E1>>
+            for &ProgramBuilderItem<'a, L, E2>
+        where
+            L: $op<R>, (E1, E2): ExprCombine,
+            L::Output: ArgType,
+        {
+            type Output = ProgramBuilderItem<'a, L::Output, <(E1, E2) as ExprCombine>::Min>;
+
+            fn $op_fn(self, other: ProgramBuilderItem<'a, R, E1>) -> Self::Output {
+                ProgramBuilderItem::create(
+                    var_format!("(", $op_sym, ")"; self.as_string(), other.as_string()),
+                    Expr,
+                )
+            }
+        }
+
+        impl<'a, L: ArgType, R: ArgType, E1: ExprType, E2: ExprType> $op<&ProgramBuilderItem<'a, R, E1>>
+            for ProgramBuilderItem<'a, L, E2>
+        where
+            L: $op<R>, (E1, E2): ExprCombine,
+            L::Output: ArgType,
+        {
+            type Output = ProgramBuilderItem<'a, L::Output, <(E1, E2) as ExprCombine>::Min>;
+
+            fn $op_fn(self, other: &ProgramBuilderItem<'a, R, E1>) -> Self::Output {
+                ProgramBuilderItem::create(
+                    var_format!("(", $op_sym, ")"; self.as_string(), other.as_string()),
+                    Expr,
+                )
+            }
+        }
+
+        impl<'a, L: ArgType, R: ArgType, E1: ExprType, E2: ExprType> $op<&ProgramBuilderItem<'a, R, E1>>
+            for &ProgramBuilderItem<'a, L, E2>
+        where
+            L: $op<R>, (E1, E2): ExprCombine,
+            L::Output: ArgType,
+        {
+            type Output = ProgramBuilderItem<'a, L::Output, <(E1, E2) as ExprCombine>::Min>;
+
+            fn $op_fn(self, other: &ProgramBuilderItem<'a, R, E1>) -> Self::Output {
                 ProgramBuilderItem::create(
                     var_format!("(", $op_sym, ")"; self.as_string(), other.as_string()),
                     Expr,
@@ -1435,7 +1527,7 @@ pub mod traits {
         }
     }
 
-    unsafe impl<'a, T: ArgType, E: ExprType> ItemType<'a> for &'a ProgramBuilderItem<'a, T, E> {
+    unsafe impl<'a, T: ArgType, E: ExprType> ItemType<'a> for &ProgramBuilderItem<'a, T, E> {
         type Expr = E;
         type Ty = T;
 

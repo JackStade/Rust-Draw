@@ -58,7 +58,7 @@ macro_rules! impl_tuple {
 	($n:expr;;) => ();
 	($n:expr; $t0:ident,$($t:ident,)*;$u0:ident,$($u:ident,)*) => (
 		unsafe impl TupleNum for $t0 {
-			const N: usize = $n;
+			const N: usize = $n - 1;
 		}
 
 		tup_index!(;$t0,$($t,)*;;$u0;$($u,)*);
@@ -109,11 +109,11 @@ pub trait RemoveBack {
 }
 
 pub trait TypeIterator<T, R> {
-    fn yeild(self) -> (T, R);
+    fn yield_item(self) -> (T, R);
 }
 
 impl<T> TypeIterator<T, ()> for T {
-    fn yeild(self) -> (T, ()) {
+    fn yield_item(self) -> (T, ()) {
         (self, ())
     }
 }
@@ -121,11 +121,11 @@ impl<T> TypeIterator<T, ()> for T {
 macro_rules! tuple_vec_operations {
 	() => ();
 	($t0:ident, $($t:ident,)*) => (
-		impl<$t0,$($t,)*> TypeIterator<$t0, ($($t),*)> for ($t0,$($t,)*) {
-			fn yeild(self) -> ($t0, ($($t),*)) {
+		impl<$t0,$($t,)*> TypeIterator<$t0, ($($t,)*)> for ($t0,$($t,)*) {
+			fn yield_item(self) -> ($t0, ($($t,)*)) {
 				let ($t0,$($t,)*) = self;
 
-				($t0, ($($t),*))
+				($t0, ($($t,)*))
 			}
 		}
 

@@ -1,4 +1,4 @@
-extern crate glfw;
+use glfw;
 
 use nalgebra as na;
 use std::cell::Cell;
@@ -6,11 +6,10 @@ use std::ffi::CString;
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem;
-use std::os::raw::{c_int, c_void};
+use std::os::raw::c_int;
 use std::ptr;
 use std::result::Result;
 use std::str;
-use std::sync::mpsc::Receiver;
 use std::thread;
 
 use crate::color;
@@ -49,21 +48,25 @@ static mut DRAW_INIT: bool = false;
 static mut GLFW_INIT: bool = false;
 
 #[inline(always)]
+#[allow(unused)]
 fn inner_gl<'a>(_: &'a mut GlDraw) -> &'a mut GlDrawCore {
     unsafe { &mut *GL_DRAW }
 }
 
 #[inline(always)]
+#[allow(unused)]
 fn inner_gl_static<'a>(_: &'a GlDraw) -> &'a GlDrawCore {
     unsafe { &*GL_DRAW }
 }
 
 #[inline(always)]
+#[allow(unused)]
 unsafe fn inner_gl_unsafe<'a>() -> &'a mut GlDrawCore {
     &mut *GL_DRAW
 }
 
 #[inline(always)]
+#[allow(unused)]
 unsafe fn inner_gl_unsafe_static<'a>() -> &'a GlDrawCore {
     &*GL_DRAW
 }
@@ -263,15 +266,15 @@ impl GlDrawCore {
         let mut found = None;
         let mut low_space = self.resource_search_start;
         for slot in self.resource_list[low_space..].iter_mut() {
-            low_space += 1;
             if *slot == 0 {
                 *slot = name;
                 self.orphan_positions[low_space] = self.resource_orphans.len() as u32;
                 found = Some(low_space);
                 break;
             }
+            low_space += 1;
         }
-        self.resource_search_start = low_space;
+        self.resource_search_start = low_space + 1;
 
         if found.is_none() {
             found = Some(self.resource_list.len());
@@ -480,6 +483,9 @@ impl GlDraw {
         unsafe {
             glfw_raw::glfwPollEvents();
             glfw_raw::glfwGetFramebufferSize(window_ptr, &mut pixels_width, ptr::null_mut());
+            if !old_context.is_null() {
+                glfw_raw::glfwMakeContextCurrent(old_context);
+            }
         }
 
         let window_data = unsafe { &mut WINDOW_GLOBAL };
@@ -575,6 +581,7 @@ pub struct GlWindow {
 pub(crate) struct WindowData {}
 
 impl WindowData {
+    #[allow(unused)]
     fn new() -> *mut WindowData {
         let data = Box::new(WindowData {});
         Box::into_raw(data)

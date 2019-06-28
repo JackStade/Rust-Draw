@@ -33,12 +33,6 @@ pub struct IndexMesh<T: ShaderArgs> {
     phantom: PhantomData<T>,
 }
 
-enum MeshDrawTypeEnum<'a> {
-    Single(u32, u32),
-    Multiple(&'a [u32], &'a [u32]),
-    Instanced(u32, u32, u32),
-}
-
 pub mod unsafe_api {
     use super::*;
     use fnv::FnvHashMap;
@@ -189,11 +183,10 @@ pub mod unsafe_api {
 
     #[inline]
     pub fn get_mesh_size<B: std::ops::Index<usize, Output = Buffer>>(
-        i: usize,
         buffers: &B,
         binding: MeshBufferBinding,
     ) -> (u32, u32) {
-        let type_size = match (binding.btype & 0b111) {
+        let type_size = match binding.btype & 0b111 {
             0 => 1,
             1 => 2,
             2 => 4,
@@ -214,7 +207,7 @@ pub mod unsafe_api {
             ((blen as u32 - binding.offset - size) / stride) + 1,
             std::u32::MAX,
         );
-        if (binding.instance_divisor != 0) {
+        if binding.instance_divisor != 0 {
             sizes = (
                 std::u32::MAX,
                 (((blen as u32 - binding.offset - size) / stride) + 1)
@@ -236,7 +229,7 @@ pub mod unsafe_api {
             gl::ARRAY_BUFFER,
             gl_draw.resource_list[buffers[binding.buffer as usize].buffer_id as usize],
         );
-        let data_type = match (binding.btype & 0b111) {
+        let data_type = match binding.btype & 0b111 {
             0 => gl::UNSIGNED_BYTE,
             1 => gl::UNSIGNED_SHORT,
             2 => gl::UNSIGNED_INT,
@@ -246,7 +239,7 @@ pub mod unsafe_api {
             _ => gl::FLOAT,
         };
 
-        match (binding.btype & 0b11000) {
+        match binding.btype & 0b11000 {
             0 => {
                 gl.VertexAttribPointer(
                     i as u32,
@@ -277,7 +270,7 @@ pub mod unsafe_api {
                 );
             }
         }
-        if (binding.instance_divisor != 0) {
+        if binding.instance_divisor != 0 {
             gl.VertexAttribDivisor(i as u32, binding.instance_divisor as u32);
         }
         gl.EnableVertexAttribArray(i as u32);
@@ -358,6 +351,7 @@ impl<T: ShaderArgs> Drop for ArrayMesh<T> {
 unsafe impl<T: ShaderArgs> Mesh<T> for IndexMesh<T> {
     type Drawer = ();
 
+    #[allow(unused)]
     unsafe fn create_drawer(&self, mode: super::DrawMode) -> () {
         unimplemented!();
     }
@@ -475,7 +469,7 @@ where
 unsafe impl InterfaceBinding for () {
     type Bind = ();
 
-    unsafe fn bind_all_to_vao(self, gl: &Gl, location: u32) {
+    unsafe fn bind_all_to_vao(self, _gl: &Gl, _location: u32) {
         // don't do anything
     }
 }
@@ -503,10 +497,9 @@ pub mod uniform {
     use super::Gl;
     use crate::opengl::shader::{api::*, traits::*};
     use crate::opengl::GlWindow;
-    use crate::tuple::{AttachFront, RemoveFront, TupleIndex};
+    use crate::tuple::{RemoveFront, TupleIndex};
     use nalgebra as na;
     use std::marker::PhantomData;
-    use std::rc::Rc;
 
     // note: 0 is a reserved value
     static mut NUM_UNIFORMS: u64 = 1;
@@ -620,7 +613,7 @@ pub mod uniform {
     }
 
     unsafe impl SetUniforms<()> for () {
-        fn push_to_vec(self, vec: &mut Vec<u32>) {
+        fn push_to_vec(self, _vec: &mut Vec<u32>) {
             // don't do anything
         }
     }

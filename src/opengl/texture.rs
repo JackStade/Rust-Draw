@@ -1,6 +1,7 @@
 use super::gl;
 use super::shader;
 use super::{inner_gl, inner_gl_unsafe, inner_gl_unsafe_static, GlDraw, GlDrawCore};
+use crate::tuple::{RemoveFront, TypeIterator};
 use gl::types::*;
 use gl::Gl;
 use shader::traits::*;
@@ -334,6 +335,92 @@ impl<F: TextureFormat> Texture2D<F> {
     }
 }
 
+pub struct ImageBindings<'a, T: ShaderArgsClass<ImageArgs>> {
+    bindings: Vec<(*const (), fn(*const (), &Gl))>,
+    phantom: PhantomData<&'a T>,
+}
+
+pub trait ArgsBindings<'a, S> {
+    fn add_to_vec(self, vec: &mut Vec<(*const (), fn(*const (), &Gl))>);
+}
+
+impl<'a> ArgsBindings<'a, ()> for () {
+    fn add_to_vec(self, _vec: &mut Vec<(*const (), fn(*const (), &Gl))>) {
+        // do nothing
+    }
+}
+
+impl<
+        'a,
+        R: 'a + BindTexture<S::Front>,
+        T: RemoveFront<Front = &'a R>,
+        S: ShaderArgsClass<ImageArgs> + RemoveFront,
+    > ArgsBindings<'a, S> for T
+where
+    T::Remaining: ArgsBindings<'a, S::Remaining>,
+{
+    fn add_to_vec(self, vec: &mut Vec<(*const (), fn(*const (), &Gl))>) {
+        let (f, r) = self.remove_front();
+        unsafe {
+            // convert an fn(&self, &Gl) to an fn(*const (), &Gl). This should
+            // be ok, since this is how trait objects work internally, though
+            // rust technically makes this UB (at least, its UB to call the function, not
+            // to create it)
+            vec.push((
+                f as *const _ as *const _,
+                std::mem::transmute::<unsafe fn(_, _) -> _, _>(R::bind),
+            ));
+        }
+        r.add_to_vec(vec);
+    }
+}
+
+impl<'a, S: ShaderArgsClass<ImageArgs>> ImageBindings<'a, S> {
+    pub fn empty() -> ImageBindings<'a, ()> {
+        ImageBindings {
+            bindings: Vec::new(),
+            phantom: PhantomData,
+        }
+    }
+
+    pub fn new<
+        F: BindTexture<<S as RemoveFront>::Front> + 'a,
+        R: ArgsBindings<'a, <S as RemoveFront>::Remaining>,
+        T: TypeIterator<&'a F, R>,
+    >(
+        t: T,
+    ) -> ImageBindings<'a, S>
+    where
+        S: RemoveFront,
+    {
+        let mut v = Vec::with_capacity(<S as ShaderArgs>::NARGS);
+        let (f, r) = t.yield_item();
+        unsafe {
+            // convert an fn(&self, &Gl) to an fn(*const (), &Gl). This should
+            // be ok, since this is how trait objects work internally, though
+            // rust technically makes this UB
+            v.push((
+                f as *const _ as *const _,
+                std::mem::transmute::<unsafe fn(_, _) -> _, _>(F::bind),
+            ));
+        }
+        r.add_to_vec(&mut v);
+        ImageBindings {
+            bindings: v,
+            phantom: PhantomData,
+        }
+    }
+
+    pub(crate) fn bind(&self, gl: &Gl) {
+        for (i, (ptr, f)) in self.bindings.iter().enumerate() {
+            unsafe {
+                gl.ActiveTexture(gl::TEXTURE0 + i as u32);
+            }
+            f(*ptr, gl);
+        }
+    }
+}
+
 unsafe impl<F: TextureFormat> BindTexture<F::Texture2D> for Texture2D<F> {
     unsafe fn bind(&self, gl: &Gl) {
         let gl_draw = inner_gl_unsafe_static();
@@ -358,8 +445,7 @@ where
     S::Ty: Sampler,
     (T::Expr, S::Expr): ExprCombine,
 {
-    // the arguments to this function cannot come from a non-main thread
-    let fmt_string = if unsafe { shader::SCOPE_DERIVS } {
+    let fmt_string = if shader::SCOPE_DERIVS.with(|x| x.get()) {
         "texture($, $)"
     } else {
         "textureLod($, $, 0)"
@@ -400,7 +486,7 @@ macro_rules! sampler {
 }
 
 use super::shader::api::*;
-use super::shader::{DataType, ItemRef, ProgramItem, VarString};
+use super::shader::{DataType, ItemRef, VarString};
 
 sampler!(Sampler2D, DataType::Sampler2D, Float4, Float2);
 sampler!(IntSampler2D, DataType::IntSampler2D, Int4, Float2);
