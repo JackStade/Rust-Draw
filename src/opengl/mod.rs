@@ -197,7 +197,7 @@ mod free_draw {
 pub mod gl {
     use super::GlWindow;
 
-    pub(super) static mut CURRENT: *const Gl = 0 as *const Gl;
+    pub(crate) static mut CURRENT: *const Gl = 0 as *const Gl;
 
     pub unsafe fn with_current<O, F: FnOnce(&Gl) -> O>(f: F) -> O {
         f(&*CURRENT)
@@ -589,16 +589,8 @@ impl WindowData {
 }
 
 impl GlWindow {
-    pub fn background<C: color::Color>(&self, color: C) {
-        let c = color.as_rgba();
-        let gl = &self.gl;
-        unsafe {
-            let old_context = glfw_raw::glfwGetCurrentContext();
-            glfw_raw::glfwMakeContextCurrent(self.ptr);
-            gl.ClearColor(c[0], c[1], c[2], c[3]);
-            gl.Clear(gl::COLOR_BUFFER_BIT);
-            glfw_raw::glfwMakeContextCurrent(old_context);
-        }
+    pub fn surface<'a>(&'a self) -> target::WindowTarget<'a> {
+        target::WindowTarget { window: self }
     }
 
     pub fn drawer<'a>(&'a self, gl: &'a mut GlDraw, cs: CoordinateSpace) -> DrawingSurface<'a> {

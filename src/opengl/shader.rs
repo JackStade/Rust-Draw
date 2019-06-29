@@ -629,7 +629,7 @@ impl<
         mesh: &M,
         uniforms: &super::mesh::uniform::Uniforms<Uniforms>,
         images: ImageBindings<Images>,
-        target: &Target,
+        target: &mut Target,
         draw: F,
         mode: DrawMode,
         options: O,

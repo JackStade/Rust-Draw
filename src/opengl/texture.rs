@@ -16,6 +16,12 @@ pub unsafe trait TextureComponents {
 
 pub struct RGBA {}
 
+pub struct RG {}
+
+pub struct R {}
+
+pub struct DepthStencil {}
+
 unsafe impl TextureComponents for RGBA {
     const FORMAT: GLuint = gl::RGBA;
     const COMPONENTS: u32 = 4;
@@ -30,6 +36,10 @@ pub unsafe trait TextureFormat: TextureBufferType {
     type Texture2D: ArgType;
 
     const INTERNAL_FORMAT: GLuint;
+}
+
+pub unsafe trait TargetTexture: TextureFormat {
+    type Target: ArgParameter<OutputArgs>;
 }
 
 /// A normalized floating point texture.
@@ -65,6 +75,16 @@ macro_rules! impl_format {
 	)
 }
 
+macro_rules! impl_target {
+    ($x:ident, $comp:ty, $t:ty, $($data:ty,)*) => (
+        $(
+            unsafe impl TargetTexture for $x<$comp, $data> {
+                type Target = $t;
+            }
+        )*
+    )
+}
+
 impl_format!(
     TextureData,
     RGBA,
@@ -78,6 +98,8 @@ impl_format!(
     i16,
     gl::RGBA16_SNORM,
 );
+
+impl_target!(TextureData, RGBA, Float4, u8, u16,);
 
 /// An integer texture format, for when it is useful to be able to read integer values directly
 /// in shaders.
@@ -129,11 +151,19 @@ impl_format!(
     gl::RGBA32I,
 );
 
+impl_target!(IntTextureData, RGBA, UInt4, u8, u16, u32,);
+
+impl_target!(IntTextureData, RGBA, Int4, i8, i16, i32,);
+
 /// A floating point texture format. The data is stored as a float and will not be altered when
 /// accessed.
 pub struct FloatTextureData<C: TextureComponents> {
     phantom: PhantomData<C>,
 }
+
+impl_format!(TextureData, RGBA, Sampler2D, f32, gl::RGBA32F,);
+
+impl_target!(TextureData, RGBA, Float4, f32,);
 
 unsafe impl<C: TextureComponents> TextureBufferType for FloatTextureData<C> {
     type Data = f32;
@@ -158,10 +188,10 @@ pub unsafe trait BindTexture<T> {
 use super::GlResource;
 
 pub struct Texture2D<F: TextureFormat> {
-    image_id: u32,
+    pub(crate) image_id: u32,
 
-    width: u32,
-    height: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     // images cannot be send or sync because they should not be dropped
     // on a different thread
     phantom: PhantomData<std::rc::Rc<F>>,
