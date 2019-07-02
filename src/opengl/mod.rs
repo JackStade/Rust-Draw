@@ -654,6 +654,7 @@ impl Drop for GlWindow {
 fn window_cleanup(ptr: *mut glfw_raw::GLFWwindow) {
     unsafe {
         mesh::unsafe_api::clear_window_vaos(ptr);
+        target::map::clear_window_fbos(ptr);
     }
 }
 

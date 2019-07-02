@@ -524,7 +524,12 @@ pub mod uniform {
                 NUM_UNIFORMS += 1;
             }
             let mut data = Vec::with_capacity(len as usize);
-            uniforms.push_to_vec(&mut data);
+            // `copy_to_slice` will fill in the entire vec,
+            // so the uninitialized memory is not a problem
+            unsafe {
+                data.set_len(len as usize);
+            }
+            uniforms.copy_to_slice(&mut data[..]);
             Uniforms {
                 data: data.into_boxed_slice(),
                 id: id,
@@ -532,6 +537,7 @@ pub mod uniform {
             }
         }
 
+        #[inline]
         pub fn new<S: SetUniforms<T>>(_window: &GlWindow, uniforms: S) -> Uniforms<T> {
             Self::new_inner(uniforms)
         }
@@ -561,7 +567,10 @@ pub mod uniform {
             Self::default_inner()
         }
 
-        pub fn set_val<S: TupleIndex<T>, U: SetUniform<S::I>>(&mut self, u: U) {
+        pub fn set_val<S: TupleIndex<T>, U: SetUniforms<(S::I,)>>(&mut self, u: U)
+        where
+            (S::I,): ShaderArgs,
+        {
             let mut i = 0;
             let mut len = 0;
             // the compiler can likely optimize this, since the length is
@@ -609,52 +618,44 @@ pub mod uniform {
     }
 
     pub unsafe trait SetUniforms<T: ShaderArgs>: Copy {
-        fn push_to_vec(self, vec: &mut Vec<u32>);
+        fn copy_to_slice(self, slice: &mut [u32]);
     }
 
     unsafe impl SetUniforms<()> for () {
-        fn push_to_vec(self, _vec: &mut Vec<u32>) {
+        fn copy_to_slice(self, _slice: &mut [u32]) {
             // don't do anything
         }
     }
 
-    unsafe impl<T: RemoveFront + Copy, A, U: ShaderArgs + RemoveFront<Front = A>> SetUniforms<U> for T
+    unsafe impl<T: RemoveFront + Copy, U: ShaderArgs + RemoveFront> SetUniforms<U> for T
     where
-        T::Front: SetUniform<A>,
+        T::Front: SetUniforms<(U::Front,)>,
         T::Remaining: SetUniforms<U::Remaining>,
-        U::Front: ArgParameter<UniformArgs>,
+        U::Front: ArgParameter<UniformArgs> + ArgType,
         U::Remaining: ShaderArgs,
     {
-        fn push_to_vec(self, vec: &mut Vec<u32>) {
+        fn copy_to_slice(self, slice: &mut [u32]) {
             let (front, remaining) = self.remove_front();
-            let l = vec.len();
-            unsafe {
-                let new_len = l + U::Front::get_param().num_elements as usize;
-                assert!(vec.capacity() >= new_len);
-                vec.set_len(new_len);
-            }
-            front.copy_to_slice(&mut vec[l..]);
-            remaining.push_to_vec(vec);
+            front.copy_to_slice(slice);
+            let new_front =
+                <U::Front as ArgParameter<UniformArgs>>::get_param().num_elements as usize;
+            remaining.copy_to_slice(&mut slice[new_front..]);
         }
-    }
-
-    pub unsafe trait SetUniform<T>: Copy {
-        fn copy_to_slice(&self, vec: &mut [u32]);
     }
 
     macro_rules! set_uniform {
         ($t:ty, $arg:ident) => {
-            unsafe impl SetUniform<$arg> for $t {
-                fn copy_to_slice(&self, slice: &mut [u32]) {
+            unsafe impl SetUniforms<($arg,)> for $t {
+                fn copy_to_slice(self, slice: &mut [u32]) {
                     // this is safe because the types used will only be
                     // f32, i32, and u32
-                    slice[0] = unsafe { std::mem::transmute(*self) };
+                    slice[0] = unsafe { std::mem::transmute(self) };
                 }
             }
         };
         (;$t:ty, $arg:ident) => {
-            unsafe impl SetUniform<$arg> for $t {
-                fn copy_to_slice(&self, slice: &mut [u32]) {
+            unsafe impl SetUniforms<($arg,)> for $t {
+                fn copy_to_slice(self, slice: &mut [u32]) {
                     // this is safe because the types used will only be
                     // f32, i32, and u32
                     slice.copy_from_slice(unsafe { std::mem::transmute::<_, &[u32]>(&self[..]) });
@@ -662,8 +663,8 @@ pub mod uniform {
             }
         };
         (;;$t:ty, $arg:ident) => {
-            unsafe impl SetUniform<$arg> for $t {
-                fn copy_to_slice(&self, slice: &mut [u32]) {
+            unsafe impl SetUniforms<($arg,)> for $t {
+                fn copy_to_slice(self, slice: &mut [u32]) {
                     // this is safe because the types used will only be
                     // f32, i32, and u32
                     slice.copy_from_slice(unsafe {

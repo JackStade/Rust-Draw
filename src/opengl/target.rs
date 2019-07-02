@@ -2,7 +2,7 @@ use super::gl;
 use super::inner_gl_unsafe_static;
 use super::shader::{
     api::*,
-    traits::{ArgParameter, OutputArgs, ShaderArgs, ShaderArgsClass},
+    traits::{ArgParameter, ArgType, OutputArgs, ShaderArgs, ShaderArgsClass},
 };
 use super::texture;
 use super::GlWindow;
@@ -10,11 +10,12 @@ use crate::color;
 use crate::tuple::{AttachFront, RemoveFront};
 use gl::types::*;
 use gl::Gl;
+use texture::*;
 
 pub unsafe trait RenderTarget<T: ShaderArgs> {
     /// Offscreen targets allow rendering to the currently active window, but rendering to a
     /// window's framebuffer directly requires activating that windows. This function
-    /// activates the window in that case. And also otherwise prepares the target for
+    /// activates the window in that case, and also otherwise prepares the target for
     /// rendering.
     unsafe fn bind_target(&mut self) -> &Gl;
 
@@ -22,12 +23,49 @@ pub unsafe trait RenderTarget<T: ShaderArgs> {
 
     fn get_stencil_bits(&self) -> u8;
 
+    /// A provided function that calls `glClear` on the render target
     fn background<C: color::Color>(&mut self, color: C) {
         let c = color.as_rgba();
         unsafe {
             let gl = self.bind_target();
             gl.ClearColor(c[0], c[1], c[2], c[3]);
             gl.Clear(gl::COLOR_BUFFER_BIT);
+        }
+    }
+
+    fn clear_depth(&mut self, clear: f32) {
+        unsafe {
+            let gl = self.bind_target();
+            gl.ClearDepth(clear as f64);
+            gl.Clear(gl::DEPTH_BUFFER_BIT);
+        }
+    }
+
+    fn clear_stencil(&mut self, clear: u8) {
+        unsafe {
+            let gl = self.bind_target();
+            gl.ClearStencil(clear as i32);
+            gl.Clear(gl::STENCIL_BUFFER_BIT);
+        }
+    }
+
+    fn clear_depth_stencil(&mut self, depth: f32, clear: u8) {
+        unsafe {
+            let gl = self.bind_target();
+            gl.ClearStencil(clear as i32);
+            gl.ClearDepth(depth as f64);
+            gl.Clear(gl::STENCIL_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+        }
+    }
+
+    fn clear_depth_stencil_color<C: color::Color>(&mut self, depth: f32, clear: u8, color: C) {
+        unsafe {
+            let gl = self.bind_target();
+            gl.ClearStencil(clear as i32);
+            gl.ClearDepth(depth as f64);
+            let c = color.as_rgba();
+            gl.ClearColor(c[0], c[1], c[2], c[3]);
+            gl.Clear(gl::COLOR_BUFFER_BIT | gl::STENCIL_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
         }
     }
 }
@@ -108,19 +146,11 @@ pub(crate) mod map {
     }
 
     #[inline]
-    pub(crate) unsafe fn clear_window_vaos(window_ptr: *mut glfw_raw::GLFWwindow) {
+    pub(crate) unsafe fn clear_window_fbos(window_ptr: *mut glfw_raw::GLFWwindow) {
         if !FBO_MAP.is_null() {
             (*FBO_MAP).retain(|key, _| key.1 != window_ptr as usize);
         }
     }
-}
-
-pub unsafe trait FBOAttachment {
-    type Arg: ArgParameter<OutputArgs>;
-
-    unsafe fn bind_attachment(&self, gl: &Gl, binding: u32);
-
-    fn width_height(&self) -> (u32, u32);
 }
 
 pub unsafe trait DepthStencilAttachment {
@@ -133,26 +163,10 @@ pub unsafe trait DepthStencilAttachment {
     fn stencil_bits(&self) -> u8;
 }
 
-unsafe impl<F: texture::TargetTexture> FBOAttachment for texture::Texture2D<F> {
-    type Arg = F::Target;
-
-    #[inline]
-    unsafe fn bind_attachment(&self, gl: &Gl, binding: u32) {
-        let gl_draw = inner_gl_unsafe_static();
-        gl.FramebufferTexture(
-            gl::FRAMEBUFFER,
-            gl::COLOR_ATTACHMENT0 + binding,
-            gl_draw.resource_list[self.image_id as usize],
-            0,
-        );
-    }
-
-    #[inline]
-    fn width_height(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-}
-
+/// It is unsafe to implement this trait for a type that isn't
+/// a reference (or a Copy type). Implementing this trait
+/// for non-copy or non reference types can (and will) cause aliased mutables
+/// and double drop errors.
 pub unsafe trait FBOAttachments {
     type Args: ShaderArgsClass<OutputArgs>;
 
@@ -162,14 +176,38 @@ pub unsafe trait FBOAttachments {
     fn width_height(&mut self) -> (u32, u32);
 }
 
-unsafe impl<'a, F: FBOAttachment + 'a, T: RemoveFront<Front = &'a mut F>> FBOAttachments for T
+unsafe impl<'a, F: texture::TargetTexture> FBOAttachments for &'a mut texture::Texture2D<F>
+where
+    F::Target: ArgParameter<OutputArgs> + ArgType,
+{
+    type Args = (F::Target,);
+
+    #[inline]
+    unsafe fn bind_attachments<FN: FnMut() -> u32>(&mut self, gl: &Gl, mut bindings: FN) {
+        let gl_draw = inner_gl_unsafe_static();
+        gl.FramebufferTexture(
+            gl::FRAMEBUFFER,
+            gl::COLOR_ATTACHMENT0 + bindings(),
+            gl_draw.resource_list[self.image_id as usize],
+            0,
+        );
+    }
+
+    #[inline]
+    fn width_height(&mut self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+}
+
+unsafe impl<'a, F: 'a + FBOAttachments, T: RemoveFront<Front = F>> FBOAttachments for T
 where
     T::Remaining: FBOAttachments,
-    <T::Remaining as FBOAttachments>::Args: AttachFront<F::Arg>,
-    <<T::Remaining as FBOAttachments>::Args as AttachFront<F::Arg>>::AttachFront:
+    F::Args: RemoveFront<Remaining = ()>,
+    <T::Remaining as FBOAttachments>::Args: AttachFront<<F::Args as RemoveFront>::Front>,
+    <<T::Remaining as FBOAttachments>::Args as AttachFront<<F::Args as RemoveFront>::Front>>::AttachFront:
         ShaderArgsClass<OutputArgs>,
 {
-    type Args = <<T::Remaining as FBOAttachments>::Args as AttachFront<F::Arg>>::AttachFront;
+    type Args = <<T::Remaining as FBOAttachments>::Args as AttachFront<<F::Args as RemoveFront>::Front>>::AttachFront;
 
     #[inline]
     unsafe fn bind_attachments<FN: FnMut() -> u32>(&mut self, gl: &Gl, mut bindings: FN) {
@@ -180,8 +218,9 @@ where
         // aliasing rule doesn't seem to apply. It is neccesary to use transmute though so that the
         // copy of the references and the original reference don't exist at the same time
         let t = std::mem::transmute::<_, *const Self>(self).read();
-        let (front, mut remaining) = t.remove_front();
-        front.bind_attachment(gl, bindings());
+        let (mut front, mut remaining) = t.remove_front();
+        let b = bindings();
+        front.bind_attachments(gl, || b);
         remaining.bind_attachments(gl, bindings);
     }
 
@@ -190,7 +229,7 @@ where
         unsafe {
             // this is why this function takes a mutable ref. See the paragraph above.
             let t = std::mem::transmute::<_, *const Self>(self).read();
-            let (front, mut remaining) = t.remove_front();
+            let (mut front, mut remaining) = t.remove_front();
             let (mut w, mut h) = front.width_height();
             let (width, height) = remaining.width_height();
             if width < w {
@@ -254,8 +293,6 @@ impl<T: FBOAttachments, D: DepthStencilAttachment> Framebuffer<T, D> {
 
 unsafe impl<T: FBOAttachments, D: DepthStencilAttachment> RenderTarget<T::Args>
     for Framebuffer<T, D>
-where
-    T: RemoveFront,
 {
     unsafe fn bind_target(&mut self) -> &Gl {
         let gl = &*gl::CURRENT;
@@ -310,3 +347,96 @@ unsafe impl DepthStencilAttachment for () {
         (-1i32 as u32, -1i32 as u32)
     }
 }
+
+macro_rules! ds_attachment {
+    ($f:ty, $db:expr, $sb:expr, $attach:expr) => {
+        unsafe impl<'a> DepthStencilAttachment for &'a mut Texture2D<$f> {
+            unsafe fn bind_attachments(&mut self, gl: &Gl) {
+                let gl_draw = inner_gl_unsafe_static();
+                gl.FramebufferTexture(
+                    gl::FRAMEBUFFER,
+                    $attach,
+                    gl_draw.resource_list[self.image_id as usize],
+                    0,
+                );
+            }
+
+            #[inline(always)]
+            fn depth_bits(&self) -> u8 {
+                $db
+            }
+
+            #[inline(always)]
+            fn stencil_bits(&self) -> u8 {
+                $sb
+            }
+
+            #[inline]
+            fn width_height(&self) -> (u32, u32) {
+                (self.width, self.height)
+            }
+        }
+    };
+    ($f:ty, $db:expr) => {
+        unsafe impl<'a> DepthStencilAttachment for (Texture2D<$f>, Texture2D<Stencil8TextureData>) {
+            unsafe fn bind_attachments(&mut self, gl: &Gl) {
+                let gl_draw = inner_gl_unsafe_static();
+                gl.FramebufferTexture(
+                    gl::FRAMEBUFFER,
+                    gl::DEPTH_ATTACHMENT,
+                    gl_draw.resource_list[self.0.image_id as usize],
+                    0,
+                );
+                gl.FramebufferTexture(
+                    gl::FRAMEBUFFER,
+                    gl::STENCIL_ATTACHMENT,
+                    gl_draw.resource_list[self.1.image_id as usize],
+                    0,
+                );
+            }
+
+            #[inline(always)]
+            fn depth_bits(&self) -> u8 {
+                $db
+            }
+
+            #[inline(always)]
+            fn stencil_bits(&self) -> u8 {
+                8
+            }
+
+            #[inline]
+            fn width_height(&self) -> (u32, u32) {
+                let (mut w, mut h) = (self.0.width, self.0.height);
+                let (width, height) = (self.0.width, self.0.height);
+                if width < w {
+                    h = height;
+                }
+                if height < h {
+                    h = height;
+                }
+                (w, h)
+            }
+        }
+    };
+}
+
+ds_attachment!(Depth16TextureData, 16, 0, gl::DEPTH_ATTACHMENT);
+ds_attachment!(Depth24TextureData, 24, 0, gl::DEPTH_ATTACHMENT);
+ds_attachment!(Depth32FloatTextureData, 32, 0, gl::DEPTH_ATTACHMENT);
+ds_attachment!(
+    Depth24Stencil8TextureData,
+    24,
+    8,
+    gl::DEPTH_STENCIL_ATTACHMENT
+);
+ds_attachment!(
+    Depth32FStencil8TextureData,
+    32,
+    8,
+    gl::DEPTH_STENCIL_ATTACHMENT
+);
+
+ds_attachment!(Depth16TextureData, 16);
+ds_attachment!(Depth24TextureData, 24);
+ds_attachment!(Depth32FloatTextureData, 32);

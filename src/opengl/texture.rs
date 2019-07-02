@@ -16,15 +16,58 @@ pub unsafe trait TextureComponents {
 
 pub struct RGBA {}
 
+pub struct RGB {}
+
 pub struct RG {}
 
 pub struct R {}
+
+pub struct Depth {}
+
+/// Stencil only textures are only supported in opengl 4.4 and higher. In opengl 4.3
+/// they can be used for renderbuffers
+#[cfg(feature = "opengl43")]
+pub struct Stencil {}
 
 pub struct DepthStencil {}
 
 unsafe impl TextureComponents for RGBA {
     const FORMAT: GLuint = gl::RGBA;
     const COMPONENTS: u32 = 4;
+}
+
+unsafe impl TextureComponents for RGB {
+    const FORMAT: GLuint = gl::RGB;
+    const COMPONENTS: u32 = 3;
+}
+
+unsafe impl TextureComponents for RG {
+    const FORMAT: GLuint = gl::RG;
+    const COMPONENTS: u32 = 2;
+}
+
+unsafe impl TextureComponents for R {
+    const FORMAT: GLuint = gl::RED;
+    const COMPONENTS: u32 = 1;
+}
+
+unsafe impl TextureComponents for Depth {
+    const FORMAT: GLuint = gl::DEPTH_COMPONENT;
+    const COMPONENTS: u32 = 1;
+}
+
+#[cfg(feature = "opengl44")]
+unsafe impl TextureComponents for Stencil {
+    const FORMAT: GLuint = gl::STENCIL_INDEX;
+    const COMPONENTS: u32 = 1;
+}
+
+unsafe impl TextureComponents for DepthStencil {
+    const FORMAT: GLuint = gl::DEPTH_STENCIL;
+    // opengl would tell you that this format has 4 components,
+    // but since we are wrapping the packed depth/stencil formats
+    // into a single struct, this is the best way to do this
+    const COMPONENTS: u32 = 1;
 }
 
 pub unsafe trait TextureBufferType {
@@ -42,16 +85,17 @@ pub unsafe trait TargetTexture: TextureFormat {
     type Target: ArgParameter<OutputArgs>;
 }
 
-/// A normalized floating point texture.
+/// A floating point texture.
 ///
-/// The data is stored as an int, but converted to a float when accessed by the GPU. The data will
-/// be mapped to [0, 1] for unsigned types and [-1, 1] for signed types.
+/// If the data type is an integer, then it is converted to a float when accessed by the GPU. The
+/// data will be mapped to [0, 1] for unsigned types and [-1, 1] for signed types.
 ///
 /// `Data` can be one of:
-/// * 'u8'
-/// * 'i8'
-/// * 'u16'
-/// * 'i16'
+/// * `u8`
+/// * `i8`
+/// * `u16`
+/// * `i16`
+/// * `f32`
 /// Note that integer types longer than 16 bits are not supported by OpenGL (this is likely because
 /// 32 bit normalized types cannot be represented losslessly with an f32)
 pub struct TextureData<C: TextureComponents, Data> {
@@ -97,20 +141,72 @@ impl_format!(
     gl::RGBA16,
     i16,
     gl::RGBA16_SNORM,
+    f32,
+    gl::RGBA32F,
 );
 
-impl_target!(TextureData, RGBA, Float4, u8, u16,);
+impl_format!(
+    TextureData,
+    RGB,
+    Sampler2D,
+    u8,
+    gl::RGB8,
+    i8,
+    gl::RGB8_SNORM,
+    u16,
+    gl::RGB16,
+    i16,
+    gl::RGB16_SNORM,
+    f32,
+    gl::RGB32F,
+);
+
+impl_format!(
+    TextureData,
+    RG,
+    Sampler2D,
+    u8,
+    gl::RG8,
+    i8,
+    gl::RG8_SNORM,
+    u16,
+    gl::RG16,
+    i16,
+    gl::RG16_SNORM,
+    f32,
+    gl::RG32F,
+);
+
+impl_format!(
+    TextureData,
+    R,
+    Sampler2D,
+    u8,
+    gl::R8,
+    i8,
+    gl::R8_SNORM,
+    u16,
+    gl::R16,
+    i16,
+    gl::R16_SNORM,
+    f32,
+    gl::R32F,
+);
+
+impl_target!(TextureData, RGBA, Float4, u8, u16, f32,);
+impl_target!(TextureData, RG, Float2, u8, u16, f32,);
+impl_target!(TextureData, R, Float, u8, u16, f32,);
 
 /// An integer texture format, for when it is useful to be able to read integer values directly
 /// in shaders.
 ///
 /// `Data` can be one of:
-/// * 'u8'
-/// * 'i8'
-/// * 'u16'
-/// * 'i16'
-/// * 'u32'
-/// * 'i32'
+/// * `u8`
+/// * `i8`
+/// * `u16`
+/// * `i16`
+/// * `u32`
+/// * `i32`
 /// Note that integer types longer than 32 bits are not supported, and that there is significant
 /// precision loss when normalizing integers longer than 32 bits.
 ///
@@ -141,6 +237,42 @@ impl_format!(
 
 impl_format!(
     IntTextureData,
+    RGB,
+    UIntSampler2D,
+    u8,
+    gl::RGB8UI,
+    u16,
+    gl::RGB16UI,
+    u32,
+    gl::RGB32UI,
+);
+
+impl_format!(
+    IntTextureData,
+    RG,
+    UIntSampler2D,
+    u8,
+    gl::RG8UI,
+    u16,
+    gl::RG16UI,
+    u32,
+    gl::RG32UI,
+);
+
+impl_format!(
+    IntTextureData,
+    R,
+    UIntSampler2D,
+    u8,
+    gl::R8UI,
+    u16,
+    gl::R16UI,
+    u32,
+    gl::R32UI,
+);
+
+impl_format!(
+    IntTextureData,
     RGBA,
     IntSampler2D,
     i8,
@@ -151,35 +283,184 @@ impl_format!(
     gl::RGBA32I,
 );
 
+impl_format!(
+    IntTextureData,
+    RGB,
+    IntSampler2D,
+    i8,
+    gl::RGB8I,
+    i16,
+    gl::RGB16I,
+    i32,
+    gl::RGB32I,
+);
+
+impl_format!(
+    IntTextureData,
+    RG,
+    IntSampler2D,
+    i8,
+    gl::RG8I,
+    i16,
+    gl::RG16I,
+    i32,
+    gl::RG32I,
+);
+
+impl_format!(
+    IntTextureData,
+    R,
+    IntSampler2D,
+    i8,
+    gl::R8I,
+    i16,
+    gl::R16I,
+    i32,
+    gl::R32I,
+);
+
 impl_target!(IntTextureData, RGBA, UInt4, u8, u16, u32,);
+impl_target!(IntTextureData, RG, UInt2, u8, u16, u32,);
+impl_target!(IntTextureData, R, UInt, u8, u16, u32,);
 
 impl_target!(IntTextureData, RGBA, Int4, i8, i16, i32,);
+impl_target!(IntTextureData, RG, Int2, i8, i16, i32,);
+impl_target!(IntTextureData, R, Int, i8, i16, i32,);
 
-/// A floating point texture format. The data is stored as a float and will not be altered when
-/// accessed.
-pub struct FloatTextureData<C: TextureComponents> {
-    phantom: PhantomData<C>,
+pub struct Depth16TextureData {}
+
+pub struct Depth24TextureData {}
+
+pub struct Depth32FloatTextureData {}
+
+pub struct Stencil8TextureData {}
+
+pub struct Depth24Stencil8TextureData {}
+
+pub struct Depth32FStencil8TextureData {}
+
+macro_rules! ds_format {
+    ($t:ty, $data:ty, $c:ty, $t2d:ty, $if:expr) => {
+        unsafe impl TextureBufferType for $t {
+            type Data = $data;
+            type Components = $c;
+        }
+
+        unsafe impl TextureFormat for $t {
+            type Texture2D = $t2d;
+
+            const INTERNAL_FORMAT: GLuint = $if;
+        }
+    };
 }
 
-impl_format!(TextureData, RGBA, Sampler2D, f32, gl::RGBA32F,);
+ds_format!(
+    Depth16TextureData,
+    u16,
+    Depth,
+    UIntSampler2D,
+    gl::DEPTH_COMPONENT16
+);
+ds_format!(
+    Depth24TextureData,
+    Depth24,
+    Depth,
+    UIntSampler2D,
+    gl::DEPTH_COMPONENT24
+);
+ds_format!(
+    Depth32FloatTextureData,
+    f32,
+    Depth,
+    Sampler2D,
+    gl::DEPTH_COMPONENT32F
+);
+ds_format!(
+    Depth24Stencil8TextureData,
+    Depth24Stencil8,
+    DepthStencil,
+    UIntSampler2D,
+    gl::DEPTH24_STENCIL8
+);
+ds_format!(
+    Depth32FStencil8TextureData,
+    Depth32FStencil8,
+    DepthStencil,
+    Sampler2D,
+    gl::DEPTH32F_STENCIL8
+);
 
-impl_target!(TextureData, RGBA, Float4, f32,);
+#[cfg(feature = "opengl44")]
+ds_format!(
+    Stencil8TextureData,
+    u8,
+    Stencil,
+    UIntSampler2D,
+    gl::STENCIL_INDEX8
+);
 
-unsafe impl<C: TextureComponents> TextureBufferType for FloatTextureData<C> {
-    type Data = f32;
-    type Components = C;
-}
-
-unsafe impl TextureFormat for FloatTextureData<RGBA> {
-    type Texture2D = FloatSampler2D;
-
-    const INTERNAL_FORMAT: GLuint = gl::RGBA32F;
+#[derive(Clone, Copy)]
+#[repr(C)]
+/// Only the low 24 bits are relevant, the high 8 bits are padding
+pub struct Depth24 {
+    pub data: u32,
 }
 
 #[derive(Clone, Copy)]
-pub struct DepthStencil24_8 {
-    data: u32,
+#[repr(C)]
+/// the low 8 bits are stencil, the high
+/// 24 bits are depth
+pub struct Depth24Stencil8 {
+    pub data: u32,
 }
+
+impl Depth24Stencil8 {
+    pub fn depth(self) -> u32 {
+        self.data >> 8
+    }
+
+    pub fn stencil(self) -> u8 {
+        (self.data & 0xFF) as u8
+    }
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+/// Only the last 8 bits of stencil are relevant,
+/// the first 24 bits are padding
+pub struct Depth32FStencil8 {
+    pub depth: f32,
+    pub stencil: u32,
+}
+
+impl Depth32FStencil8 {
+    pub fn depth(self) -> f32 {
+        self.depth
+    }
+
+    pub fn stencil(self) -> u8 {
+        (self.stencil & 0xFF) as u8
+    }
+}
+
+macro_rules! format_data {
+    ($($t:ty, $ty:expr,)*) => (
+        $(
+            unsafe impl GlDataType for $t {
+                const TYPE: gl::types::GLenum = $ty;
+            }
+        )*
+    )
+}
+
+format_data!(
+    Depth24,
+    gl::UNSIGNED_INT,
+    Depth24Stencil8,
+    gl::UNSIGNED_INT_24_8,
+    Depth32FStencil8,
+    gl::FLOAT_32_UNSIGNED_INT_24_8_REV,
+);
 
 pub unsafe trait BindTexture<T> {
     unsafe fn bind(&self, gl: &Gl);
@@ -315,6 +596,42 @@ impl<F: TextureFormat> Texture2D<F> {
                     width,
                     height,
                     data.as_ptr(),
+                    mem::align_of::<F::Data>(),
+                );
+            })
+        }
+        id = gl_draw.get_resource_generic::<Self>(tex, None);
+        Texture2D {
+            image_id: id,
+
+            width: width,
+            height: height,
+
+            phantom: PhantomData,
+        }
+    }
+
+    /// It can be useful when rendering to textures to generate an emtpy texture. The
+    /// contents of the texture are undefined. It could just be 0, or it could be random
+    /// data.
+    pub fn uninitialized(_context: &super::GlWindow, width: u32, height: u32) -> Texture2D<F> {
+        let gl_draw = unsafe { inner_gl_unsafe() };
+        let id;
+        let mut tex = 0;
+        unsafe {
+            gl::with_current(|gl| {
+                gl.GenTextures(1, &mut tex);
+                Self::load_image(
+                    gl_draw,
+                    gl,
+                    tex,
+                    width,
+                    height,
+                    // opengl interprets this to mean that the texture should not be
+                    // filled. Note that if the texture is orphaned and adopted, the new
+                    // texture will be initialized with whatever garbage data was generated
+                    // by opengl here
+                    ptr::null(),
                     mem::align_of::<F::Data>(),
                 );
             })
@@ -521,4 +838,3 @@ use super::shader::{DataType, ItemRef, VarString};
 sampler!(Sampler2D, DataType::Sampler2D, Float4, Float2);
 sampler!(IntSampler2D, DataType::IntSampler2D, Int4, Float2);
 sampler!(UIntSampler2D, DataType::UIntSampler2D, UInt4, Float2);
-sampler!(FloatSampler2D, DataType::FloatSampler2D, Float4, Float2);
