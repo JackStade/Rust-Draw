@@ -509,7 +509,8 @@ impl GlDraw {
         }
     }
 
-    pub fn draw<'a>(&'a mut self, window: &GlWindow) {
+    pub fn update(&mut self, surface: &WindowSurface) {
+        let window = surface.window;
         unsafe {
             glfw_raw::glfwSwapBuffers(window.ptr);
             glfw_raw::glfwPollEvents();
@@ -588,19 +589,47 @@ impl WindowData {
     }
 }
 
+/// A context key is a zero sized type used to statically check that
+/// certain operations are executed in a valid context.
+#[derive(Clone, Copy)]
+pub struct ContextKey<'a> {
+    // rc is a non-send non-sync type, which makes sure that
+    // context key isn't transfered to different threads
+    phantom: PhantomData<std::rc::Rc<&'a ()>>,
+}
+
+pub struct WindowSurface<'a> {
+    window: &'a GlWindow,
+}
+
 impl GlWindow {
-    pub fn surface<'a>(&'a self) -> target::WindowTarget<'a> {
-        target::WindowTarget { window: self }
+    /// There are two independent components of a window, the context key
+    /// and the drawing surface.
+    ///
+    /// The context key is needed for many operations to ensure
+    /// that a context is loaded and that the function is being called
+    /// from the right thread.
+    ///
+    /// The drawing surface is used for rendering to the window. Opertaions
+    /// that modify or read from the window's framebuffer need mutable/static
+    /// references to this component.
+    pub fn components<'a>(&'a mut self) -> (ContextKey<'a>, WindowSurface<'a>) {
+        (
+            ContextKey {
+                phantom: PhantomData,
+            },
+            WindowSurface { window: self },
+        )
     }
 
-    pub fn drawer<'a>(&'a self, gl: &'a mut GlDraw, cs: CoordinateSpace) -> DrawingSurface<'a> {
+    /*pub fn drawer<'a>(&'a self, gl: &'a mut GlDraw, cs: CoordinateSpace) -> DrawingSurface<'a> {
         DrawingSurface {
             gl: gl,
             window: &self,
             coordinate_space: cs,
             transform: Cell::new(na::Matrix4::<f32>::identity()),
         }
-    }
+    }*/
 
     pub fn get_width_height(&self) -> (i32, i32) {
         (self.width.get(), self.height.get())
@@ -685,6 +714,7 @@ pub const LINE_STRIP: DrawMode = DrawMode {
     mode: gl::LINE_STRIP,
 };
 
+/*
 /// For the lifetime of the DrawingSurface, it is assumed that the active context
 /// is the window.
 pub struct DrawingSurface<'a> {
@@ -852,4 +882,4 @@ impl<'a> DrawingSurface<'a> {
             gl.DrawArrays(gl::TRIANGLES, 0, 3);
         }
     }
-}
+}*/

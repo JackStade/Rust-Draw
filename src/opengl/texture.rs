@@ -64,7 +64,7 @@ unsafe impl TextureComponents for Stencil {
 
 unsafe impl TextureComponents for DepthStencil {
     const FORMAT: GLuint = gl::DEPTH_STENCIL;
-    // opengl would tell you that this format has 4 components,
+    // opengl would tell you that this format has 2 components,
     // but since we are wrapping the packed depth/stencil formats
     // into a single struct, this is the best way to do this
     const COMPONENTS: u32 = 1;
@@ -574,7 +574,7 @@ impl<F: TextureFormat> GlResource for Texture2D<F> {
 
 impl<F: TextureFormat> Texture2D<F> {
     pub fn new(
-        _context: &super::GlWindow,
+        _context: super::ContextKey,
         width: u32,
         height: u32,
         data: &[F::Data],
@@ -614,7 +614,7 @@ impl<F: TextureFormat> Texture2D<F> {
     /// It can be useful when rendering to textures to generate an emtpy texture. The
     /// contents of the texture are undefined. It could just be 0, or it could be random
     /// data.
-    pub fn uninitialized(_context: &super::GlWindow, width: u32, height: u32) -> Texture2D<F> {
+    pub fn uninitialized(_context: super::ContextKey, width: u32, height: u32) -> Texture2D<F> {
         let gl_draw = unsafe { inner_gl_unsafe() };
         let id;
         let mut tex = 0;

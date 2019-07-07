@@ -70,11 +70,7 @@ pub unsafe trait RenderTarget<T: ShaderArgs> {
     }
 }
 
-pub struct WindowTarget<'a> {
-    pub window: &'a super::GlWindow,
-}
-
-unsafe impl<'a> RenderTarget<(Float4,)> for WindowTarget<'a> {
+unsafe impl<'a> RenderTarget<(Float4,)> for super::WindowSurface<'a> {
     unsafe fn bind_target(&mut self) -> &Gl {
         super::activate_window(self.window);
         self.window.gl.BindFramebuffer(gl::FRAMEBUFFER, 0);
@@ -273,7 +269,7 @@ impl<T: FBOAttachments, D: DepthStencilAttachment> Drop for Framebuffer<T, D> {
 }
 
 impl<T: FBOAttachments, D: DepthStencilAttachment> Framebuffer<T, D> {
-    pub fn new(_window: &GlWindow, mut t: T, d: D) -> Framebuffer<T, D> {
+    pub fn new(_context: super::ContextKey, mut t: T, d: D) -> Framebuffer<T, D> {
         let (mut w, mut h) = t.width_height();
         let (width, height) = d.width_height();
         if width < w {
@@ -377,48 +373,6 @@ macro_rules! ds_attachment {
             }
         }
     };
-    ($f:ty, $db:expr) => {
-        unsafe impl<'a> DepthStencilAttachment for (Texture2D<$f>, Texture2D<Stencil8TextureData>) {
-            unsafe fn bind_attachments(&mut self, gl: &Gl) {
-                let gl_draw = inner_gl_unsafe_static();
-                gl.FramebufferTexture(
-                    gl::FRAMEBUFFER,
-                    gl::DEPTH_ATTACHMENT,
-                    gl_draw.resource_list[self.0.image_id as usize],
-                    0,
-                );
-                gl.FramebufferTexture(
-                    gl::FRAMEBUFFER,
-                    gl::STENCIL_ATTACHMENT,
-                    gl_draw.resource_list[self.1.image_id as usize],
-                    0,
-                );
-            }
-
-            #[inline(always)]
-            fn depth_bits(&self) -> u8 {
-                $db
-            }
-
-            #[inline(always)]
-            fn stencil_bits(&self) -> u8 {
-                8
-            }
-
-            #[inline]
-            fn width_height(&self) -> (u32, u32) {
-                let (mut w, mut h) = (self.0.width, self.0.height);
-                let (width, height) = (self.0.width, self.0.height);
-                if width < w {
-                    h = height;
-                }
-                if height < h {
-                    h = height;
-                }
-                (w, h)
-            }
-        }
-    };
 }
 
 ds_attachment!(Depth16TextureData, 16, 0, gl::DEPTH_ATTACHMENT);
@@ -436,7 +390,3 @@ ds_attachment!(
     8,
     gl::DEPTH_STENCIL_ATTACHMENT
 );
-
-ds_attachment!(Depth16TextureData, 16);
-ds_attachment!(Depth24TextureData, 24);
-ds_attachment!(Depth32FloatTextureData, 32);

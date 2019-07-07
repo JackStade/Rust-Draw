@@ -612,8 +612,8 @@ impl<In: ShaderArgs, Uniforms: ShaderArgs, Images: ShaderArgs, Out: ShaderArgs> 
 use super::mesh::Mesh;
 use super::target::RenderTarget;
 use super::texture::ImageBindings;
+use super::ContextKey;
 use super::DrawMode;
-use super::GlWindow;
 use render_options::RenderOptions;
 
 impl<
@@ -625,7 +625,7 @@ impl<
 {
     pub fn draw<M: Mesh<In>, Target: RenderTarget<Out>, O: RenderOptions, F: Fn(M::Drawer)>(
         &self,
-        _context: &GlWindow,
+        _context: ContextKey,
         mesh: &M,
         uniforms: &super::mesh::uniform::Uniforms<Uniforms>,
         images: ImageBindings<Images>,
@@ -1020,7 +1020,7 @@ pub fn create_program<
         BuiltInFragInputs,
     ) -> (Out, BuiltInFragOutputs<'a>),
 >(
-    _window: &super::GlWindow,
+    _context: ContextKey,
     builder: ProgramBuilder<'a>,
     vertex_shader_fn: VertFN,
     fragment_shader_fn: FragFN,
@@ -1928,7 +1928,7 @@ pub mod vec {
         )
     }
 
-    vec_litterals!(VecFloat, f32, VecInt, i32, VecUInt, u32, VecBoolean, bool);
+    // vec_litterals!(VecFloat, f32, VecInt, i32, VecUInt, u32, VecBoolean, bool);
 
     #[derive(Clone, Copy)]
     pub struct VecFloat {
@@ -2025,21 +2025,80 @@ pub mod vec {
         type Next = T::Next;
     }
 
+    pub unsafe trait ArgConstruct<'a> {
+        type Vec: VecType;
+        type Len: VecLen;
+        type Expr: ExprType;
+
+        fn as_arg_string(self) -> VarString;
+    }
+
+    macro_rules! arg_construct {
+        ($t:ty, $vec:ty) => {
+            unsafe impl<'a> ArgConstruct<'a> for $t {
+                type Vec = $vec;
+                type Len = Vec1;
+                type Expr = Constant;
+
+                fn as_arg_string(self) -> VarString {
+                    VarString::new(format!("{}", self))
+                }
+            }
+        };
+    }
+
+    arg_construct!(f32, VecFloat);
+    arg_construct!(u32, VecUInt);
+    arg_construct!(i32, VecInt);
+    arg_construct!(bool, VecBoolean);
+
+    unsafe impl<'a, V: VecType, L: VecLen, T: ItemType<'a, Ty = GlVec<V, L>>> ArgConstruct<'a> for T {
+        type Vec = V;
+        type Len = L;
+        type Expr = T::Expr;
+
+        fn as_arg_string(self) -> VarString {
+            self.as_string()
+        }
+    }
+
+    pub unsafe trait LenConstruct<L: VecLen> {}
+
+    pub unsafe trait TypeConstruct<T: VecType> {}
+
+    unsafe impl<L1: VecLen, L2: VecLen> LenConstruct<L1> for L2 {}
+
+    unsafe impl LenConstruct<Vec4> for (Vec1, Vec1, Vec1, Vec1) {}
+    unsafe impl LenConstruct<Vec4> for (Vec1, Vec1, Vec2) {}
+    unsafe impl LenConstruct<Vec4> for (Vec1, Vec2, Vec1) {}
+    unsafe impl LenConstruct<Vec4> for (Vec2, Vec1, Vec1) {}
+    unsafe impl LenConstruct<Vec4> for (Vec2, Vec2) {}
+    unsafe impl LenConstruct<Vec4> for (Vec1, Vec3) {}
+    unsafe impl LenConstruct<Vec4> for (Vec3, Vec1) {}
+    unsafe impl LenConstruct<Vec3> for (Vec1, Vec1, Vec1) {}
+    unsafe impl LenConstruct<Vec3> for (Vec2, Vec1) {}
+    unsafe impl LenConstruct<Vec3> for (Vec1, Vec2) {}
+    unsafe impl LenConstruct<Vec2> for (Vec1, Vec1) {}
+
+    unsafe impl<T: VecType> TypeConstruct<T> for T {}
+
     macro_rules! construct_vec {
-        ($len:ty, $($t:ty),*;$($place:ident),*) => (
-            impl<'a, T: VecType, $($place: ExprType),*>
-                Construct<'a, GlVec<T, $len>, <($($place,)*) as ExprMin>::Min> for
-                ($(ProgramBuilderItem<'a, GlVec<T, $t>, $place>),*)
+        ($($place:ident),*) => (
+            impl<'a, T: VecType, L: VecLen, $($place: ArgConstruct<'a>),*>
+                Construct<'a, GlVec<T, L>, <($($place::Expr,)*) as ExprMin>::Min> for
+                ($($place),*)
             where
-                ($($place,)*): ExprMin,
+                ($($place::Expr,)*): ExprMin,
+                ($($place::Len),*): LenConstruct<L>,
+                $($place::Vec: TypeConstruct<T>),*
             {
                 fn construct(self) ->
-                    ProgramBuilderItem<'a, GlVec<T, $len>, <($($place,)*) as ExprMin>::Min>
+                    ProgramBuilderItem<'a, GlVec<T, L>, <($($place::Expr,)*) as ExprMin>::Min>
                 {
-                    let ($($place,)*) = self;
-                    let ($($place,)*) = ($($place.item.data.into_inner(),)*);
+                    let ($($place),*) = self;
+                    let ($($place),*) = ($($place.as_arg_string()),*);
                     let s = var_format!(
-                        format!("{}(", <GlVec<T, $len>>::data_type().gl_type()),
+                        format!("{}(", <GlVec<T, L>>::data_type().gl_type()),
                         $({let _ = stringify!($place); ", "}),*;
                         $($place),*);
                     // remove the trailing comma
@@ -2051,16 +2110,10 @@ pub mod vec {
         )
     }
 
-    construct_vec!(Vec4, Vec1, Vec1, Vec1, Vec1; U1, U2, U3, U4);
-    construct_vec!(Vec4, Vec1, Vec1, Vec2; U1, U2, U3);
-    construct_vec!(Vec4, Vec1, Vec2, Vec1; U1, U2, U3);
-    construct_vec!(Vec4, Vec2, Vec1, Vec1; U1, U2, U3);
-    construct_vec!(Vec4, Vec1, Vec3; U1, U2);
-    construct_vec!(Vec4, Vec3, Vec1; U1, U2);
-    construct_vec!(Vec3, Vec1, Vec1, Vec1; U1, U2, U3);
-    construct_vec!(Vec3, Vec1, Vec2; U1, U2);
-    construct_vec!(Vec3, Vec2, Vec1; U1, U2);
-    construct_vec!(Vec2, Vec1, Vec1; U1, U2);
+    construct_vec!(U1, U2, U3, U4);
+    construct_vec!(U1, U2, U3);
+    construct_vec!(U1, U2);
+    construct_vec!(U1);
 
     impl<T: VecType, L: VecLen> Add<GlVec<T, L>> for GlVec<T, L> {
         type Output = GlVec<T, L>;
@@ -2205,21 +2258,8 @@ pub mod vec {
     }
 }
 
-impl<'a, T: VecType, L: VecLen, E: ExprType> Construct<'a, GlVec<T, L>, E>
-    for ProgramBuilderItem<'a, GlVec<T, Vec1>, E>
-where
-    GlVec<T, L>: ArgType,
-{
-    fn construct(self) -> ProgramBuilderItem<'a, GlVec<T, L>, E> {
-        let s = var_format!(
-            format!("{}(", <GlVec<T, L>>::data_type().gl_type()), ")";
-            self.item.data.into_inner());
-        ProgramBuilderItem::create(s, Expr)
-    }
-}
-
 impl<'a, T: VecType, L: VecLen, E: ExprType> ProgramBuilderItem<'a, GlVec<T, L>, E> {
-    pub fn map<M: MapFor<T, L>>(self) -> ProgramBuilderItem<'a, GlVec<T, M::L_Out>, E>
+    pub fn map<M: MapFor<T, L>>(&self) -> ProgramBuilderItem<'a, GlVec<T, M::L_Out>, E>
     where
         M::L_Out: VecLen,
     {

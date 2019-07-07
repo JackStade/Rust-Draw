@@ -1,6 +1,7 @@
 use super::gl;
 use super::shader;
 use super::shader::traits::*;
+use super::ContextKey;
 use super::{inner_gl_unsafe, inner_gl_unsafe_static, GlResource};
 use crate::tuple::TupleIndex;
 use crate::tuple::{AttachFront, RemoveFront};
@@ -392,7 +393,7 @@ pub struct VertexBuffer<T: GlDataType> {
 }
 
 impl<T: GlDataType> VertexBuffer<T> {
-    pub fn new(_window: &super::GlWindow, data: &[T]) -> VertexBuffer<T> {
+    pub fn new<K>(_context: K, data: &[T]) -> VertexBuffer<T> {
         unsafe {
             // note: we could take the gl from the window, but that window is
             // not necessarily the active window. If some window exists, then there
@@ -496,7 +497,7 @@ where
 pub mod uniform {
     use super::Gl;
     use crate::opengl::shader::{api::*, traits::*};
-    use crate::opengl::GlWindow;
+    use crate::opengl::ContextKey;
     use crate::tuple::{RemoveFront, TupleIndex};
     use nalgebra as na;
     use std::marker::PhantomData;
@@ -538,7 +539,7 @@ pub mod uniform {
         }
 
         #[inline]
-        pub fn new<S: SetUniforms<T>>(_window: &GlWindow, uniforms: S) -> Uniforms<T> {
+        pub fn new<S: SetUniforms<T>>(_window: ContextKey, uniforms: S) -> Uniforms<T> {
             Self::new_inner(uniforms)
         }
 
@@ -563,7 +564,7 @@ pub mod uniform {
         }
 
         // Initializes the uniforms to all be 0
-        pub fn default(_window: &GlWindow) -> Uniforms<T> {
+        pub fn default(_context: ContextKey) -> Uniforms<T> {
             Self::default_inner()
         }
 
