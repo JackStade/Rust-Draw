@@ -33,4 +33,6 @@ opengl46 = ["opengl45"]
 
 draw_call_bounds_checks = []
 
+draw_debug = []
+
 longer_tuples = []

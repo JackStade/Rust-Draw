@@ -171,7 +171,21 @@ pub mod unsafe_api {
     #[inline]
     pub unsafe fn clear_vaos(id: usize) {
         if !VAO_MAP.is_null() {
-            (*VAO_MAP).retain(|key, _| key.0 != id);
+            (*VAO_MAP).retain(|key, vao| {
+                // but what if a mesh is dropped when there aren't any
+                // active windows? windows clear vaos on destruction,
+                // so the gl will never be used in an orphan state.
+                // this is why we can't have one call to gl::with_current
+                // wrapping the call to `retain`, because it would cause
+                // the creation of an invalid reference, which is illegal
+                // just by existing
+                if key.0 != id {
+                    true
+                } else {
+                    gl::with_current(|gl| gl.DeleteVertexArrays(1, vao));
+                    false
+                }
+            });
         }
     }
 
@@ -607,11 +621,15 @@ pub mod uniform {
             }
         }
 
-        pub(crate) unsafe fn set_uniforms<F: FnMut() -> u32>(&self, gl: &Gl, mut locations: F) {
+        pub(crate) unsafe fn set_uniforms<F: Iterator<Item = u32>>(
+            &self,
+            gl: &Gl,
+            mut locations: F,
+        ) {
             let mut n = 0;
             let mut data_point = 0;
             while n < T::NARGS as u32 {
-                self.set_uniform(gl, n, data_point, locations());
+                self.set_uniform(gl, n, data_point, locations.next().unwrap());
                 data_point += T::get_param(n as usize).num_elements as usize;
                 n += 1;
             }

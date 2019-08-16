@@ -28,6 +28,9 @@ use gl::Gl;
 #[allow(non_snake_case)]
 pub mod shader;
 
+#[cfg(feature = "draw_debug")]
+pub mod draw_debug;
+
 pub mod texture;
 
 pub mod mesh;
@@ -158,6 +161,7 @@ struct WindowGlobal {
 //
 static mut EPOCH: u64 = 1;
 
+#[cfg(not(feature = "draw_debug"))]
 struct GlDrawCore {
     // resources are objects that are shared between contexts, and have all relevant data stored
     // on the gpu. When all windows are closed it is neccesary to "orphan" these resources by
@@ -167,7 +171,7 @@ struct GlDrawCore {
     // while there are no windows opened the resources are technically invalid, but cannot be used
     // during that time.
     // 0 represents an open space, since opengl functions cannot return 0 as a name. This array cannot
-    // be reordered, since objects store references to the ids in it.
+    // be reordered, since objects store indices into it.
     resource_list: Vec<GLuint>,
     resource_search_start: usize,
     orphan_positions: Vec<GLuint>,
@@ -178,11 +182,21 @@ struct GlDrawCore {
     windows: Vec<*mut glfw_raw::GLFWwindow>,
 }
 
-const NUM_DRAW_BUFFERS: i32 = 3;
+#[cfg(feature = "draw_debug")]
+struct GlDrawCore {
+    resource_list: Vec<GLuint>,
+    resource_search_start: usize,
+    orphan_positions: Vec<GLuint>,
+    resource_orphans: Vec<DynResource>,
+    windows: Vec<*mut glfw_raw::GLFWwindow>,
+    // resources that are updated during a frame (textures, buffers)
+    // need to store copies
+    priors: Vec<GLuint>,
+}
 
 mod free_draw {
     use super::gl::types::*;
-    use super::NUM_DRAW_BUFFERS;
+    pub const NUM_DRAW_BUFFERS: i32 = 3;
 
     pub static mut DRAW_BUFFERS: [GLuint; NUM_DRAW_BUFFERS as usize] =
         [0; NUM_DRAW_BUFFERS as usize];
@@ -193,6 +207,8 @@ mod free_draw {
     pub static mut TEX_SHADER_TEX: GLint = 0;
     pub static mut TEX_SHADER_TRANSFORM: GLint = 0;
 }
+
+use free_draw::*;
 
 pub mod gl {
     use super::GlWindow;
@@ -209,7 +225,7 @@ pub mod gl {
     ///
     /// On some operating system the function pointers for different windows
     /// may be the same, but this should not be relied upon. Calling a function
-    /// pointer when that window is not active should be considered to be
+    /// pointer when that window is not active can be considered to be
     /// UB.
     pub unsafe fn get_gl<'a>(window: &'a GlWindow) -> &'a Gl {
         &window.gl
@@ -219,6 +235,18 @@ pub mod gl {
 }
 
 impl GlDrawCore {
+    #[cfg(not(feature = "draw_debug"))]
+    fn new() -> GlDrawCore {
+        GlDrawCore {
+            resource_list: Vec::new(),
+            resource_search_start: 0,
+            orphan_positions: Vec::new(),
+            resource_orphans: Vec::new(),
+            windows: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "draw_debug")]
     fn new() -> GlDrawCore {
         GlDrawCore {
             resource_list: Vec::new(),
@@ -509,7 +537,7 @@ impl GlDraw {
         }
     }
 
-    pub fn update(&mut self, surface: &WindowSurface) {
+    pub fn update(&self, surface: &mut WindowSurface) {
         let window = surface.window;
         unsafe {
             glfw_raw::glfwSwapBuffers(window.ptr);
@@ -589,7 +617,7 @@ impl WindowData {
     }
 }
 
-/// A context key is a zero sized type used to statically check that
+/// A context key is a zero-sized type used to statically check that
 /// certain operations are executed in a valid context.
 #[derive(Clone, Copy)]
 pub struct ContextKey<'a> {
@@ -613,6 +641,7 @@ impl GlWindow {
     /// The drawing surface is used for rendering to the window. Opertaions
     /// that modify or read from the window's framebuffer need mutable/static
     /// references to this component.
+    #[inline(always)]
     pub fn components<'a>(&'a mut self) -> (ContextKey<'a>, WindowSurface<'a>) {
         (
             ContextKey {

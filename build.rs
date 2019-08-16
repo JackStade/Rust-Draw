@@ -30,11 +30,207 @@ const GL_VERSION: u8 = 6;
 
 fn main() {
     let dest = env::var("OUT_DIR").unwrap();
-    let mut file = File::create(&Path::new(&dest).join("bindings.rs")).unwrap();
+    let mut gl_file = File::create(&Path::new(&dest).join("bindings.rs")).unwrap();
+    let mut blend_file = File::create(&Path::new(&dest).join("blend.rs")).unwrap();
+
+    write_blend_gen(&mut blend_file).unwrap();
 
     Registry::new(Api::Gl, (4, GL_VERSION), Profile::Core, Fallbacks::All, [])
-        .write_bindings(ArrayStructGenerator, &mut file)
+        .write_bindings(ArrayStructGenerator, &mut gl_file)
         .unwrap();
+}
+
+fn write_blend_gen<W: io::Write>(w: &mut W) -> io::Result<()> {
+    write!(
+        w,
+        "#[derive(Clone, Copy)]\npub struct One;\n#[derive(Clone, Copy)]\npub struct Zero;\n\n"
+    )?;
+    writeln!(w, "pub const ZERO: Zero = Zero;")?;
+    writeln!(w, "pub const ONE: One = One;")?;
+
+    let srcdst = ["Src", "Dst"];
+    let alphacolor = ["Color", "Alpha"];
+
+    let mut base_types = Vec::with_capacity(4);
+    let mut gl_enums = Vec::with_capacity(4);
+
+    write!(w, "#[derive(Clone, Copy)]\npub struct SrcTimesDstColor;\n")?;
+    write!(w, "#[derive(Clone, Copy)]\npub struct SrcTimesDstAlpha;\n")?;
+
+    for p in &srcdst {
+        for c in &alphacolor {
+            let s = format!("{}{}", p, c);
+            write!(w, "#[derive(Clone, Copy)]\npub struct {};\n", s)?;
+            write!(
+                w,
+                "#[derive(Clone, Copy)]\npub struct {}WithParam{{p: u32}}\n",
+                s
+            )?;
+            write!(w, "#[derive(Clone, Copy)]\npub struct OneMinus{};\n", s)?;
+            write!(
+                w,
+                "pub const {up}_{uc}: {s} = {s};\n",
+                up = p.to_uppercase(),
+                uc = c.to_uppercase(),
+                s = s,
+            )?;
+            let om = format!("OneMinus{}", s);
+            write_op(w, "One", &s, &om, &om, "Sub")?;
+            base_types.push(s);
+            gl_enums.push(format!("{}_{}", p.to_uppercase(), c.to_uppercase()));
+        }
+    }
+
+    for t1 in 0..4 {
+        for t2 in 0..4 {
+            let (rt, result) = if t1 == t2 {
+                let r = format!("{}WithParam", base_types[t1]);
+                (r.clone(), format!("{}{{p: gl::{}}}", r, gl_enums[t1]))
+            } else if t1 % 2 == t2 % 2 {
+                let r = format!("SrcTimesDst{}", alphacolor[t1 % 2]);
+                (r.clone(), r)
+            } else if t1 % 2 == 0 {
+                let r = format!("{}WithParam", base_types[t1]);
+                (r.clone(), format!("{}{{p: gl::{}}}", r, gl_enums[t2]))
+            } else {
+                // t1 % 2 == 1, t2 % 2 == 0
+                let r = format!("{}WithParam", base_types[t2]);
+                (r.clone(), format!("{}{{p: gl::{}}}", r, gl_enums[t1]))
+            };
+            let om = format!("OneMinus{}", base_types[t2]);
+            let om_rt = format!("{}WithParam", base_types[t1]);
+            let om_result = format!("{}{{p: gl::ONE_MINUS_{}}}", om_rt, gl_enums[t2]);
+            write_op(w, &base_types[t1], &base_types[t2], &result, &rt, "Mul")?;
+            write_op(w, &base_types[t1], &om, &om_result, &om_rt, "Mul")?;
+            write_op(w, &om, &base_types[t1], &om_result, &om_rt, "Mul")?;
+        }
+        let result = format!("{}WithParam", base_types[t1]);
+        let one_out = format!("{}{{p: gl::ONE}}", result);
+        let zero_out = format!("{}{{p: gl::ZERO}}", result);
+        write_op(w, &base_types[t1], "One", &one_out, &result, "Mul")?;
+        write_op(w, "One", &base_types[t1], &one_out, &result, "Mul")?;
+        write_op(w, &base_types[t1], "Zero", &zero_out, &result, "Mul")?;
+        write_op(w, "Zero", &base_types[t1], &zero_out, &result, "Mul")?;
+    }
+    for c in &alphacolor {
+        let out_ty = format!("{}Func", c);
+        let ambig = format!("SrcTimesDst{}", c);
+        let ambig_src = format!("gl::DST_{}", c.to_uppercase());
+        let ambig_dst = format!("gl::SRC_{}", c.to_uppercase());
+
+        write_op(
+            w,
+            &ambig,
+            &ambig,
+            &format!(
+                "{}{{eqn: gl::FUNC_ADD, src: {}, dst: {}}}",
+                out_ty, ambig_src, ambig_dst
+            ),
+            &out_ty,
+            "Add",
+        );
+        write_op(
+            w,
+            &ambig,
+            &ambig,
+            // we are subtracting something from itself
+            &format!(
+                "{}{{eqn: gl::FUNC_ADD, src: gl::ZERO, dst: gl::ZERO}}",
+                out_ty
+            ),
+            &out_ty,
+            "Sub",
+        );
+
+        let src = format!("Src{}WithParam", c);
+        let dst = format!("Dst{}WithParam", c);
+        let src_val = "src.p";
+        let dst_val = "dst.p";
+
+        write_linear_ops(w, &out_ty, &src, &dst, src_val, dst_val)?;
+        write_linear_ops(w, &out_ty, &src, &ambig, src_val, &ambig_dst)?;
+        write_linear_ops(w, &out_ty, &ambig, &dst, &ambig_src, dst_val)?;
+    }
+
+    Ok(())
+}
+
+fn write_linear_ops<W: io::Write>(
+    w: &mut W,
+    out_ty: &str,
+    src: &str,
+    dst: &str,
+    src_val: &str,
+    dst_val: &str,
+) -> io::Result<()> {
+    let out_param_add = format!(
+        "{}{{eqn: gl::FUNC_ADD, src: {}, dst: {}}}",
+        out_ty, src_val, dst_val
+    );
+    let out_param_sub = format!(
+        "{}{{eqn: gl::FUNC_SUBTRACT, src: {}, dst: {}}}",
+        out_ty, src_val, dst_val
+    );
+    let out_param_rev_sub = format!(
+        "{}{{eqn: gl::FUNC_REVERSE_SUBTRACT, src: {}, dst: {}}}",
+        out_ty, src_val, dst_val
+    );
+    let f_vars = "let src = self;let dst = rhs;";
+    let r_vars = "let src = rhs;let dst = self;";
+    write_op(
+        w,
+        src,
+        dst,
+        &format!("{}{}", f_vars, out_param_add),
+        out_ty,
+        "Add",
+    )?;
+    write_op(
+        w,
+        dst,
+        src,
+        &format!("{}{}", r_vars, out_param_add),
+        out_ty,
+        "Add",
+    )?;
+    write_op(
+        w,
+        src,
+        dst,
+        &format!("{}{}", f_vars, out_param_sub),
+        out_ty,
+        "Sub",
+    )?;
+    write_op(
+        w,
+        dst,
+        src,
+        &format!("{}{}", r_vars, out_param_rev_sub),
+        out_ty,
+        "Sub",
+    )
+}
+
+fn write_op<W: io::Write>(
+    w: &mut W,
+    t1: &str,
+    t2: &str,
+    out: &str,
+    out_ty: &str,
+    op: &str,
+) -> io::Result<()> {
+    writeln!(w, "impl std::ops::{}<{}> for {} {{", op, t2, t1)?;
+    writeln!(w, "type Output = {};", out_ty)?;
+    write!(
+        w,
+        "fn {}(self: {}, rhs: {}) -> {} {{{}}}",
+        op.to_lowercase(),
+        t1,
+        t2,
+        out_ty,
+        out,
+    )?;
+    writeln!(w, "}}")
 }
 
 // note: the following code is derived from
@@ -143,9 +339,6 @@ where
     )
 }
 
-/// Creates a `panicking` module which contains one function per GL command.
-///
-/// These functions are the mocks that are called if the real function could not be loaded.
 fn write_panicking_fns<W>(registry: &Registry, dest: &mut W) -> io::Result<()>
 where
     W: io::Write,

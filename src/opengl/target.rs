@@ -90,6 +90,7 @@ unsafe impl<'a> RenderTarget<(Float4,)> for super::WindowSurface<'a> {
 }
 
 pub(crate) mod map {
+    use super::gl;
     use super::gl::types::*;
     use fnv::FnvHashMap;
     use glfw::ffi as glfw_raw;
@@ -105,7 +106,6 @@ pub(crate) mod map {
 
     static mut FBO_MAP: *mut FnvHashMap<(usize, usize), GLuint> = 0 as *mut _;
 
-    /// Add the vao to the map. This vao will be bound to the current window.
     #[inline]
     pub(crate) unsafe fn add_fbo(id: usize, fbo: GLuint) {
         if FBO_MAP.is_null() {
@@ -120,8 +120,6 @@ pub(crate) mod map {
         (*FBO_MAP).insert((id, crate::opengl::CURRENT_WINDOW as usize), fbo);
     }
 
-    /// Search for a vao corresponding to the current window and
-    /// the id given.
     #[inline]
     pub(crate) unsafe fn get_fbo(id: usize) -> Option<GLuint> {
         if FBO_MAP.is_null() {
@@ -132,12 +130,17 @@ pub(crate) mod map {
             .map(|fbo| *fbo)
     }
 
-    /// Clear all the vaos owned by a certain mesh. This should be
-    /// called when the mesh is dropped.
     #[inline]
     pub(crate) unsafe fn clear_fbos(id: usize) {
         if !FBO_MAP.is_null() {
-            (*FBO_MAP).retain(|key, _| key.0 != id);
+            (*FBO_MAP).retain(|key, fbo| {
+                if key.0 != id {
+                    true
+                } else {
+                    gl::with_current(|gl| gl.DeleteFramebuffers(1, fbo));
+                    false
+                }
+            });
         }
     }
 
@@ -165,10 +168,14 @@ pub unsafe trait DepthStencilAttachment {
 /// and double drop errors.
 pub unsafe trait FBOAttachments {
     type Args: ShaderArgsClass<OutputArgs>;
+    const SIZED: bool;
 
     unsafe fn bind_attachments<F: FnMut() -> u32>(&mut self, gl: &Gl, bindings: F);
 
-    /// this takes a mutable reference for some kind of complicated reasons.
+    #[cfg(feature = "draw_debug")]
+    unsafe fn get_debug(&mut self);
+
+    /// This takes a mutable reference for some kind of complicated reasons.
     fn width_height(&mut self) -> (u32, u32);
 }
 
@@ -177,6 +184,7 @@ where
     F::Target: ArgParameter<OutputArgs> + ArgType,
 {
     type Args = (F::Target,);
+    const SIZED: bool = true;
 
     #[inline]
     unsafe fn bind_attachments<FN: FnMut() -> u32>(&mut self, gl: &Gl, mut bindings: FN) {
@@ -204,6 +212,7 @@ where
         ShaderArgsClass<OutputArgs>,
 {
     type Args = <<T::Remaining as FBOAttachments>::Args as AttachFront<<F::Args as RemoveFront>::Front>>::AttachFront;
+    const SIZED: bool = true;
 
     #[inline]
     unsafe fn bind_attachments<FN: FnMut() -> u32>(&mut self, gl: &Gl, mut bindings: FN) {
@@ -241,6 +250,7 @@ where
 
 unsafe impl FBOAttachments for () {
     type Args = ();
+    const SIZED: bool = false;
 
     #[inline(always)]
     unsafe fn bind_attachments<F: FnMut() -> u32>(&mut self, _gl: &Gl, _bindings: F) {
@@ -250,6 +260,37 @@ unsafe impl FBOAttachments for () {
     #[inline(always)]
     fn width_height(&mut self) -> (u32, u32) {
         (-1i32 as u32, -1i32 as u32)
+    }
+}
+
+// An empty framebuffer target.
+#[derive(Clone, Copy)]
+pub struct EmptyTarget {
+    pub width: u32,
+    pub height: u32,
+}
+
+unsafe impl FBOAttachments for EmptyTarget {
+    type Args = ();
+    const SIZED: bool = true;
+
+    #[inline(always)]
+    unsafe fn bind_attachments<F: FnMut() -> u32>(&mut self, gl: &Gl, _bindings: F) {
+        gl.FramebufferParameteri(
+            gl::FRAMEBUFFER,
+            gl::FRAMEBUFFER_DEFAULT_WIDTH,
+            self.width as i32,
+        );
+        gl.FramebufferParameteri(
+            gl::FRAMEBUFFER,
+            gl::FRAMEBUFFER_DEFAULT_HEIGHT,
+            self.height as i32,
+        );
+    }
+
+    #[inline(always)]
+    fn width_height(&mut self) -> (u32, u32) {
+        (self.width, self.height)
     }
 }
 
@@ -269,7 +310,18 @@ impl<T: FBOAttachments, D: DepthStencilAttachment> Drop for Framebuffer<T, D> {
 }
 
 impl<T: FBOAttachments, D: DepthStencilAttachment> Framebuffer<T, D> {
-    pub fn new(_context: super::ContextKey, mut t: T, d: D) -> Framebuffer<T, D> {
+    pub fn new(_context: super::ContextKey, mut t: T, mut d: D) -> Framebuffer<T, D> {
+        if d.depth_bits() == 0 && d.stencil_bits() == 0 {
+            if T::Args::NARGS == 0 {
+                if cfg!(feature = "opengl43") {
+                    panic!(
+                        "Cannot use () and () as types for a framebuffer. Try using EmptyTarget."
+                    );
+                } else {
+                    panic!("Empty framebuffers not supported. Must have at least on attachment (depth/stencil or color).");
+                }
+            }
+        }
         let (mut w, mut h) = t.width_height();
         let (width, height) = d.width_height();
         if width < w {
@@ -284,6 +336,14 @@ impl<T: FBOAttachments, D: DepthStencilAttachment> Framebuffer<T, D> {
             depth_stencil: d,
             width_height: (w, h),
         }
+    }
+
+    pub fn color_attachments(&self) -> &T {
+        &self.colors
+    }
+
+    pub fn depth_stencil_attachments(&self) -> &D {
+        &self.depth_stencil
     }
 }
 
@@ -301,7 +361,7 @@ unsafe impl<T: FBOAttachments, D: DepthStencilAttachment> RenderTarget<T::Args>
             map::add_fbo(self.id, fbo);
             gl.BindFramebuffer(gl::FRAMEBUFFER, fbo);
             let mut i = 0;
-            self.colors.bind_attachments(gl, || {
+            self.colors.bind_attachments(gl, move || {
                 let x = i;
                 i += 1;
                 x

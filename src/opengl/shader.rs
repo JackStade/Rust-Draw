@@ -616,6 +616,25 @@ use super::ContextKey;
 use super::DrawMode;
 use render_options::RenderOptions;
 
+#[cfg(feature = "draw_debug")]
+pub(crate) mod draw_record {
+    struct DrawCall {
+        data: Vec<u8>,
+    }
+
+    struct UniformLocations {}
+
+    impl Iterator for UniformLocations {
+        type Item = u32;
+
+        fn next(&mut self) -> u32 {}
+    }
+
+    impl DrawCall {
+        unsafe fn call() {}
+    }
+}
+
 impl<
         In: ShaderArgs,
         Uniforms: ShaderArgsClass<UniformArgs>,
@@ -628,7 +647,7 @@ impl<
         _context: ContextKey,
         mesh: &M,
         uniforms: &super::mesh::uniform::Uniforms<Uniforms>,
-        images: ImageBindings<Images>,
+        images: &ImageBindings<Images>,
         target: &mut Target,
         draw: F,
         mode: DrawMode,
@@ -648,11 +667,7 @@ impl<
 
             let mut slice = &self.uniform_locations[..];
 
-            uniforms.set_uniforms(gl, || {
-                let loc = slice[0];
-                slice = &slice[1..];
-                loc as u32
-            });
+            uniforms.set_uniforms(gl, slice.iter().map(|x| *x as u32));
 
             for i in 0..self.image_locations.len() {
                 gl.Uniform1i(self.image_locations[i], i as i32);
@@ -717,7 +732,6 @@ pub mod render_options {
     use crate::opengl::GlWindow;
     use crate::tuple::{AttachFront, RemoveFront};
 
-    /// Renderoptions is implemented for
     pub unsafe trait RenderOptions: Copy {
         unsafe fn with_options<F: FnOnce()>(self, gl: &Gl, clo: F);
     }
@@ -964,13 +978,113 @@ pub mod render_options {
     }
 
     #[derive(Clone, Copy)]
+    pub struct BlendFunc {
+        color_eqn: u32,
+        alpha_eqn: u32,
+        color_src: u32,
+        color_dst: u32,
+        alpha_src: u32,
+        alpha_dst: u32,
+    }
+
+    #[allow(unused)]
+    pub mod blend {
+        use super::gl;
+        use super::BlendFunc;
+
+        #[derive(Clone, Copy)]
+        pub struct ColorFunc {
+            eqn: u32,
+            src: u32,
+            dst: u32,
+        }
+
+        #[derive(Clone, Copy)]
+        pub struct AlphaFunc {
+            eqn: u32,
+            src: u32,
+            dst: u32,
+        }
+
+        pub const MAX_COLOR: ColorFunc = ColorFunc {
+            eqn: gl::MAX,
+            src: gl::ZERO,
+            dst: gl::ZERO,
+        };
+
+        pub const MIN_COLOR: ColorFunc = ColorFunc {
+            eqn: gl::MIN,
+            src: gl::ZERO,
+            dst: gl::ZERO,
+        };
+
+        pub const MAX_ALPHA: AlphaFunc = AlphaFunc {
+            eqn: gl::MAX,
+            src: gl::ZERO,
+            dst: gl::ZERO,
+        };
+
+        pub const MIN_ALPHA: AlphaFunc = AlphaFunc {
+            eqn: gl::MIN,
+            src: gl::ZERO,
+            dst: gl::ZERO,
+        };
+
+        impl std::ops::Add<ColorFunc> for AlphaFunc {
+            type Output = BlendFunc;
+
+            fn add(self: AlphaFunc, other: ColorFunc) -> BlendFunc {
+                BlendFunc {
+                    color_eqn: other.eqn,
+                    alpha_eqn: self.eqn,
+                    color_src: other.src,
+                    color_dst: other.dst,
+                    alpha_src: self.src,
+                    alpha_dst: self.dst,
+                }
+            }
+        }
+
+        impl std::ops::Add<AlphaFunc> for ColorFunc {
+            type Output = BlendFunc;
+
+            fn add(self: ColorFunc, other: AlphaFunc) -> BlendFunc {
+                other + self
+            }
+        }
+
+        include!(concat!(env!("OUT_DIR"), "/blend.rs"));
+    }
+
+    #[derive(Clone, Copy)]
     pub struct Blend {
+        pub enabled: bool,
         /// Which color buffer should have blending enabled.
         /// Note: as of right now, this isn't actually checked.
         /// trying to enable blending for a non-enabled buffer
         /// won't actually hurt anything, but may cause an error
         /// message.
         pub buffer: u32,
+        pub func: BlendFunc,
+    }
+
+    unsafe impl RenderOptions for Blend {
+        unsafe fn with_options<F: FnOnce()>(self, gl: &Gl, clo: F) {
+            if self.enabled {
+                gl.Enablei(gl::BLEND, self.buffer);
+                gl.BlendEquationSeparate(self.func.color_eqn, self.func.alpha_eqn);
+                gl.BlendFuncSeparate(
+                    self.func.color_src,
+                    self.func.color_dst,
+                    self.func.alpha_src,
+                    self.func.alpha_dst,
+                );
+                clo();
+                gl.Disablei(gl::BLEND, self.buffer);
+            } else {
+                clo();
+            }
+        }
     }
 }
 
@@ -1232,7 +1346,7 @@ where
     shader = format!("{}{}\n", shader, bstring);
     shader = format!("{}{}\n", shader, out_strings);
     shader = format!("{}}}\n", shader);
-    println!("{}\n", shader);
+    // println!("{}\n", shader);
     shader
 }
 
@@ -2386,6 +2500,25 @@ vec_uniform!(
     VecUInt, Vec1, Uniform4uiv, 1;
 );
 
+pub unsafe trait Matrix: ArgType {
+    const COLUMNS: usize;
+    type Column: VecLen;
+}
+
+impl<'a, T: Matrix, E: ExprType> ProgramBuilderItem<'a, T, E> {
+    fn column(&self, i: usize) -> ProgramBuilderItem<'a, GlVec<VecFloat, T::Column>, E> {
+        if i >= T::COLUMNS {
+            panic!(
+                "Index {} is too large for a matrix with {} columns",
+                i,
+                T::COLUMNS
+            );
+        }
+        let s = var_format!("", format!("[{}]", i);self.as_string());
+        ProgramBuilderItem::create(s, Expr)
+    }
+}
+
 macro_rules! impl_matrix {
     ($matrix_type:ident, $data:expr) => {
         #[derive(Clone)]
@@ -2481,25 +2614,30 @@ macro_rules! mat_ops {
 }
 
 macro_rules! matrix_param {
-    (;$cols:expr) => ();
-    ($mat:ident, $($m:ident,)*; $cols:expr) => (
+    (;$l:ty, $cols:expr) => ();
+    ($mat:ident, $($m:ident,)*;$l:ty, $cols:expr) => (
+
+        unsafe impl Matrix for $mat {
+            const COLUMNS: usize = $cols;
+            type Column = $l;
+        }
+
         unsafe impl ArgParameter<TransparentArgs> for $mat {
             fn get_param() -> TransparentArgs {
                 TransparentArgs { num_locations: 1, num_input_locations: $cols }
             }
         }
-        matrix_param!($($m,)*;$cols - 1);
+        matrix_param!($($m,)*;$l, $cols - 1);
     )
 }
 
 macro_rules! create_matrix {
-    ($t:ident, $($vec:ident, $($mat:ident,)*;)*) => (
+    ($t:ident, $($l:ty,)*; $($vec:ident, $($mat:ident,)*;)*) => (
         matrix_subs!($($vec, $($mat,)*;)*);
         mat_ops!($($($mat,)*;)* | $($($mat,)*;)*);
         mat_ops!(!$($vec,)*;$($vec,)*;$($($mat,)*;)*);
-
         $(
-            matrix_param!($($mat,)*;4);
+            matrix_param!($($mat,)*;$l, 4);
             $(
                 arg_op!(Mul, mul, $t, $mat, $mat);
                 arg_op!(Mul, mul, $mat, $t, $mat);
@@ -2526,7 +2664,7 @@ macro_rules! mat_uniform {
     );
 }
 
-create_matrix!(Float,
+create_matrix!(Float, Vec4, Vec3, Vec2,;
     Float4, Float4x4, Float3x4, Float2x4,;
     Float3, Float4x3, Float3x3, Float2x3,;
     Float2, Float4x2, Float3x2, Float2x2,;);

@@ -628,9 +628,8 @@ impl<F: TextureFormat> Texture2D<F> {
                     width,
                     height,
                     // opengl interprets this to mean that the texture should not be
-                    // filled. Note that if the texture is orphaned and adopted, the new
-                    // texture will be initialized with whatever garbage data was generated
-                    // by opengl here
+                    // initialized. Note that if the texture is orphaned and adopted, the new
+                    // texture will still have the (garbage) data from the old texture transfered
                     ptr::null(),
                     mem::align_of::<F::Data>(),
                 );
@@ -679,6 +678,44 @@ impl<F: TextureFormat> Texture2D<F> {
 
         gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
         gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
+    }
+
+    /// Used for debug drawing, creates a new opengl image with a copy of the data in this one.
+    pub(crate) fn make_copy_image(&self) -> GLuint {
+        unsafe {
+            gl::with_current(|gl| {
+                let data_size = mem::size_of::<F::Data>();
+                let num_comps = F::Components::COMPONENTS;
+                let w = self.width;
+                let h = self.height;
+                // we need to determine the size of each row (in bytes) so that the buffer has room for padding bytes
+                let row_size = data_size as u32 * num_comps * w;
+                // adding 3 will round the size up if it is not already a multiple of 4
+                let buffer_row_size = (row_size + 3) >> 2;
+                let mut buff = Vec::<u32>::with_capacity(buffer_row_size as usize * h as usize);
+                gl.PixelStorei(gl::PACK_ALIGNMENT, 4);
+                gl.GetTexImage(
+                    gl::TEXTURE_2D,
+                    0,
+                    F::Components::FORMAT,
+                    F::Data::TYPE,
+                    // the first 3 bytes are used for other data
+                    buff.as_mut_ptr() as *mut _,
+                );
+                let mut tex = 0;
+                gl.GenTextures(1, &mut tex);
+                Texture2D::<F>::load_image(
+                    inner_gl_unsafe(),
+                    gl,
+                    tex,
+                    w,
+                    h,
+                    buff.as_ptr() as *const _,
+                    4,
+                );
+                tex
+            })
+        }
     }
 }
 
