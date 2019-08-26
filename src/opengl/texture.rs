@@ -759,14 +759,16 @@ where
     }
 }
 
-impl<'a, S: ShaderArgsClass<ImageArgs>> ImageBindings<'a, S> {
-    pub fn empty() -> ImageBindings<'a, ()> {
+impl ImageBindings<'static, ()> {
+    pub fn empty() -> ImageBindings<'static, ()> {
         ImageBindings {
             bindings: Vec::new(),
             phantom: PhantomData,
         }
     }
+}
 
+impl<'a, S: ShaderArgsClass<ImageArgs>> ImageBindings<'a, S> {
     pub fn new<
         F: BindTexture<<S as RemoveFront>::Front> + 'a,
         R: ArgsBindings<'a, <S as RemoveFront>::Remaining>,

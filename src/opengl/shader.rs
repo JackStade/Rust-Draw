@@ -180,7 +180,7 @@ impl VarString {
         let s = format!("{}", &self.string[start..end]);
         let mut v = Vec::new();
         for (pos, var) in &self.vars {
-            if *pos >= start && *pos < end {
+            if *pos >= start && *pos <= end {
                 v.push((pos - start, var.clone()));
             }
         }
@@ -642,7 +642,7 @@ impl<
         Out: ShaderArgs,
     > ShaderProgram<In, Uniforms, Images, Out>
 {
-    pub fn draw<M: Mesh<In>, Target: RenderTarget<Out>, O: RenderOptions, F: Fn(M::Drawer)>(
+    pub fn draw<M: Mesh<In>, Target: RenderTarget<Out>, O: RenderOptions, F: Fn(&M::Drawer)>(
         &self,
         _context: ContextKey,
         mesh: &M,
@@ -679,7 +679,7 @@ impl<
 
             let drawer = mesh.create_drawer(mode);
 
-            options.with_options(gl, || draw(drawer));
+            options.with_options(gl, || draw(&drawer));
 
             // we want to make sure any subsequent binds to
             // the the element array buffer don't effect vao state
@@ -754,9 +754,9 @@ pub mod render_options {
     }
 
     #[derive(Clone, Copy)]
-    pub struct DisableDepth;
+    pub struct EnableDepth;
 
-    pub const DISABLE_DEPTH: DisableDepth = DisableDepth;
+    pub const ENABLE_DEPTH: EnableDepth = EnableDepth;
 
     #[derive(Clone, Copy)]
     pub struct DepthFunc {
@@ -822,24 +822,24 @@ pub mod render_options {
         pub back: StencilTest,
     }
 
-    unsafe impl RenderOptions for DisableDepth {
+    unsafe impl RenderOptions for EnableDepth {
         unsafe fn with_options<F: FnOnce()>(self, gl: &Gl, clo: F) {
-            gl.Disable(gl::DEPTH_TEST);
-            clo();
             gl.Enable(gl::DEPTH_TEST);
+            clo();
+            gl.Disable(gl::DEPTH_TEST);
         }
     }
 
     unsafe impl RenderOptions for DepthTest {
         unsafe fn with_options<F: FnOnce()>(self, gl: &Gl, clo: F) {
             if !self.enabled {
-                gl.Disable(gl::DEPTH_TEST);
                 clo();
-                gl.Enable(gl::DEPTH_TEST);
             } else {
+                gl.Enable(gl::DEPTH_TEST);
                 gl.DepthFunc(self.func.val);
                 gl.DepthFunc(gl::LESS);
                 clo();
+                gl.Disable(gl::DEPTH_TEST);
             }
         }
     }
@@ -1469,6 +1469,8 @@ pub mod api {
         Float2x2, Float2x3, Float2x4, Float3x2, Float3x3, Float3x4, Float4x2, Float4x3, Float4x4,
     };
 
+    pub use super::builtin_fns::*;
+
     pub type FragOutputs<'a> = super::BuiltInFragOutputs<'a>;
     pub type VertOutputs<'a> = super::BuiltInVertOutputs<'a>;
 
@@ -1627,7 +1629,7 @@ pub mod traits {
     };
     use std::ops::{Add, Div, Mul, Neg, Sub};
 
-    pub unsafe trait GlDataType: Copy {
+    pub unsafe trait GlDataType {
         const TYPE: gl::types::GLenum;
     }
 
@@ -1753,7 +1755,7 @@ pub mod traits {
 
     pub unsafe trait ArgClass: Copy {}
 
-    pub unsafe trait ArgParameter<T: ArgClass> {
+    pub unsafe trait ArgParameter<T: ArgClass>: ArgType {
         fn get_param() -> T;
     }
 
@@ -2391,6 +2393,48 @@ pub fn construct<'a, T: ArgType, E: ExprType, C: Construct<'a, T, E>>(
     c: C,
 ) -> ProgramBuilderItem<'a, T, E> {
     c.construct()
+}
+
+pub mod builtin_fns {
+    use super::api::*;
+    use super::traits::*;
+    use super::vec::*;
+    use super::{ProgramBuilderItem, VarString};
+
+    macro_rules! fn_impl {
+        ($f:ident) => {
+            fn_impl!($f, stringify!($f), VecFloat, VecFloat, x; U);
+        };
+        ($f:ident, $gl_f:expr, $it:ty, $ot:ty, $($args:ident),*; $($place:ident),*) => {
+            pub fn $f<
+                'a,
+                L: VecLen,
+                $($place: ItemType<'a, Ty = GlVec<$it, L>>),*
+            >($($args: $place),*) ->
+                ProgramBuilderItem<'a, GlVec<$ot, L>, <($($place::Expr,)*) as ExprMin>::Min>
+            where
+                ($($place::Expr,)*): ExprMin
+            {
+                let s = var_format!(format!("{}(", $gl_f),
+                    $({let _ = stringify!($args); ", "}),*;
+                    $($args.as_string()),*
+                );
+                let l = s.len();
+                let s = var_format!("", ")"; s.substring(0, l - 2));
+                ProgramBuilderItem::create(s, super::ItemRef::Expr)
+            }
+        }
+    }
+
+    fn_impl!(radians);
+    fn_impl!(degrees);
+    fn_impl!(sin);
+    fn_impl!(cos);
+    fn_impl!(tan);
+    fn_impl!(asin);
+    fn_impl!(acos);
+    fn_impl!(atan);
+    fn_impl!(abs);
 }
 
 #[derive(Clone, Copy)]

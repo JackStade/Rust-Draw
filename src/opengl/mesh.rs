@@ -13,25 +13,79 @@ use std::marker::PhantomData;
 use std::mem;
 use std::ptr;
 
-pub struct ArrayMesh<T: ShaderArgs> {
-    // the mesh contains buffers, which prevent it from being send or sync
-    buffers: Box<[Buffer]>,
+pub struct ArrayMesh<'a, T: ShaderArgs> {
     bindings: Box<[MeshBufferBinding]>,
     num_indices: u32,
     num_instances: u32,
     id: usize,
-    phantom: PhantomData<T>,
+    // the mesh might contain its buffers
+    // or it might reference them
+    _to_drop: Box<[Buffer]>,
+    phantom: PhantomData<std::rc::Rc<&'a T>>,
 }
 
-pub struct IndexMesh<T: ShaderArgs> {
-    buffers: Box<[Buffer]>,
+impl<'a, T: ShaderArgsClass<TransparentArgs>> ArrayMesh<'a, T> {
+    pub fn new<S: IntoMesh<Args = T> + 'a>(s: S) -> ArrayMesh<'a, T> {
+        let mut bindings = Vec::with_capacity(T::NARGS);
+        let mut to_drop = Vec::new();
+        let (indices, instances) = s.add_bindings(&mut bindings, &mut to_drop);
+        if instances == 0 {
+            panic!("The number of instances cannot be 0.");
+        }
+        ArrayMesh {
+            bindings: bindings.into_boxed_slice(),
+            num_indices: indices,
+            num_instances: instances,
+            // note: types that implement IntoMesh should not be
+            // send or sync, and should only be able to be constructed
+            // on the thread owning the gl_draw
+            id: unsafe { get_mesh_id() },
+            _to_drop: to_drop.into_boxed_slice(),
+            phantom: PhantomData,
+        }
+    }
+}
+
+pub struct IndexMesh<'a, T: ShaderArgs> {
     bindings: Box<[MeshBufferBinding]>,
-    index_buffer: Buffer,
+    index_buffer: u32,
     index_type: GLenum,
     num_indices: u32,
+    num_elements: u32,
     num_instances: u32,
     id: usize,
-    phantom: PhantomData<T>,
+    // the mesh might contain its buffers
+    // or it might reference them
+    _to_drop: Box<[Buffer]>,
+    phantom: PhantomData<std::rc::Rc<&'a T>>,
+}
+
+impl<'a, T: ShaderArgsClass<TransparentArgs>> IndexMesh<'a, T> {
+    pub fn new<S: IntoMesh<Args = T> + 'a, I: IndexType>(
+        s: S,
+        i: &'a ElementBuffer<I>,
+    ) -> IndexMesh<'a, T> {
+        let mut bindings = Vec::with_capacity(T::NARGS);
+        let mut to_drop = Vec::new();
+        let (indices, instances) = s.add_bindings(&mut bindings, &mut to_drop);
+        if instances == 0 {
+            panic!("The number of instances cannot be 0.");
+        }
+        IndexMesh {
+            bindings: bindings.into_boxed_slice(),
+            index_buffer: i.buffer.get_id(),
+            index_type: I::TYPE,
+            num_indices: (i.buffer.buffer_len / std::mem::size_of::<I>()) as u32,
+            num_elements: indices,
+            num_instances: instances,
+            // note: types that implement IntoMesh should not be
+            // send or sync, and should only be able to be constructed
+            // on the thread owning the gl_draw
+            id: unsafe { get_mesh_id() },
+            _to_drop: to_drop.into_boxed_slice(),
+            phantom: PhantomData,
+        }
+    }
 }
 
 pub mod unsafe_api {
@@ -42,18 +96,18 @@ pub mod unsafe_api {
 
     static mut MESH_NUM: usize = 1;
 
-    pub unsafe fn create_array_mesh<T: ShaderArgsClass<TransparentArgs>>(
+    pub unsafe fn create_array_mesh<'a, T: ShaderArgsClass<TransparentArgs>>(
         buffers: Box<[Buffer]>,
         bindings: Box<[MeshBufferBinding]>,
         num_indices: u32,
         num_instances: u32,
-    ) -> ArrayMesh<T> {
+    ) -> ArrayMesh<'a, T> {
         ArrayMesh {
-            buffers: buffers,
             bindings: bindings,
             num_indices: num_indices,
             num_instances: num_instances,
             id: get_mesh_id(),
+            _to_drop: buffers,
             phantom: PhantomData,
         }
     }
@@ -70,7 +124,7 @@ pub mod unsafe_api {
         pub(crate) buffer: u32,
         pub(crate) size: u8,
         pub(crate) instance_divisor: u16,
-        /// the 1s 2s, and 3s bits represent the data type,
+        /// the 1s 2s, and 4s bits represent the data type,
         /// 0 = U8
         /// 1 = U16
         /// 2 = U32
@@ -78,7 +132,7 @@ pub mod unsafe_api {
         /// 4 = I16
         /// 5 = I32
         /// 6 = Float
-        /// the 4s and 5s bits represent whether to normalize the data,
+        /// the 8s and 16s bits represent whether to normalize the data,
         /// and whether to use VertexAttribPointer or VertexAttribIPointer
         /// 0 = float, unnormed
         /// 8 = float, normed
@@ -197,10 +251,7 @@ pub mod unsafe_api {
     }
 
     #[inline]
-    pub fn get_mesh_size<B: std::ops::Index<usize, Output = Buffer>>(
-        buffers: &B,
-        binding: MeshBufferBinding,
-    ) -> (u32, u32) {
+    pub fn get_mesh_size(binding: MeshBufferBinding, blen: usize) -> (u32, u32) {
         let type_size = match binding.btype & 0b111 {
             0 => 1,
             1 => 2,
@@ -217,32 +268,32 @@ pub mod unsafe_api {
         } else {
             stride = binding.stride;
         }
-        let blen = buffers[binding.buffer as usize].buffer_len;
         let mut sizes = (
-            ((blen as u32 - binding.offset - size) / stride) + 1,
-            std::u32::MAX,
+            ((blen - binding.offset as usize - size as usize) / stride as usize) + 1,
+            std::u32::MAX as usize,
         );
         if binding.instance_divisor != 0 {
             sizes = (
-                std::u32::MAX,
-                (((blen as u32 - binding.offset - size) / stride) + 1)
-                    * binding.instance_divisor as u32,
+                std::u32::MAX as usize,
+                (((blen - binding.offset as usize - size as usize) / stride as usize) + 1)
+                    * binding.instance_divisor as usize,
             );
         }
-        sizes
+        if sizes.0 > std::u32::MAX as usize {
+            sizes.0 = std::u32::MAX as usize;
+        }
+        if sizes.1 > std::u32::MAX as usize {
+            sizes.1 = std::u32::MAX as usize;
+        }
+        (sizes.0 as u32, sizes.1 as u32)
     }
 
     #[inline]
-    pub unsafe fn bind_mesh_buffer<B: std::ops::Index<usize, Output = Buffer> + ?Sized>(
-        gl: &Gl,
-        i: usize,
-        buffers: &B,
-        binding: MeshBufferBinding,
-    ) {
+    pub unsafe fn bind_mesh_buffer(gl: &Gl, i: usize, binding: MeshBufferBinding) {
         let gl_draw = super::inner_gl_unsafe_static();
         gl.BindBuffer(
             gl::ARRAY_BUFFER,
-            gl_draw.resource_list[buffers[binding.buffer as usize].buffer_id as usize],
+            gl_draw.resource_list[binding.buffer as usize],
         );
         let data_type = match binding.btype & 0b111 {
             0 => gl::UNSIGNED_BYTE,
@@ -313,7 +364,13 @@ pub struct ArrayDrawer {
 }
 
 impl ArrayDrawer {
-    pub fn draw_arrays(self, start: u32, count: u32) {
+    pub fn draw_all(&self) {
+        unsafe {
+            gl::with_current(|gl| gl.DrawArrays(self.mode, 0, self.num_indices as i32));
+        }
+    }
+
+    pub fn draw_arrays(&self, start: u32, count: u32) {
         if cfg!(feature = "draw_call_bounds_checks") {
             if (start + count) > self.num_indices {
                 panic!(
@@ -328,7 +385,7 @@ impl ArrayDrawer {
     }
 }
 
-unsafe impl<T: ShaderArgs> Mesh<T> for ArrayMesh<T> {
+unsafe impl<'a, T: ShaderArgs> Mesh<T> for ArrayMesh<'a, T> {
     type Drawer = ArrayDrawer;
 
     unsafe fn create_drawer(&self, mode: super::DrawMode) -> ArrayDrawer {
@@ -346,8 +403,8 @@ unsafe impl<T: ShaderArgs> Mesh<T> for ArrayMesh<T> {
             let mut vao = 0;
             gl.GenVertexArrays(1, &mut vao);
             gl.BindVertexArray(vao);
-            for i in 0..self.buffers.len() {
-                bind_mesh_buffer(gl, i, &self.buffers[..], self.bindings[i]);
+            for i in 0..self.bindings.len() {
+                bind_mesh_buffer(gl, i, self.bindings[i]);
             }
             gl.BindBuffer(gl::ARRAY_BUFFER, 0);
             add_vao(self.id, vao);
@@ -355,7 +412,7 @@ unsafe impl<T: ShaderArgs> Mesh<T> for ArrayMesh<T> {
     }
 }
 
-impl<T: ShaderArgs> Drop for ArrayMesh<T> {
+impl<'a, T: ShaderArgs> Drop for ArrayMesh<'a, T> {
     fn drop(&mut self) {
         unsafe {
             clear_vaos(self.id);
@@ -363,10 +420,9 @@ impl<T: ShaderArgs> Drop for ArrayMesh<T> {
     }
 }
 
-unsafe impl<T: ShaderArgs> Mesh<T> for IndexMesh<T> {
+unsafe impl<'a, T: ShaderArgs> Mesh<T> for IndexMesh<'a, T> {
     type Drawer = ();
 
-    #[allow(unused)]
     unsafe fn create_drawer(&self, mode: super::DrawMode) -> () {
         unimplemented!();
     }
@@ -378,13 +434,13 @@ unsafe impl<T: ShaderArgs> Mesh<T> for IndexMesh<T> {
             let mut vao = 0;
             gl.GenVertexArrays(1, &mut vao);
             gl.BindVertexArray(vao);
-            for i in 0..self.buffers.len() {
-                bind_mesh_buffer(gl, i, &self.buffers[..], self.bindings[i]);
+            for i in 0..self.bindings.len() {
+                bind_mesh_buffer(gl, i, self.bindings[i]);
             }
             let gl_draw = inner_gl_unsafe_static();
             gl.BindBuffer(
                 gl::ELEMENT_ARRAY_BUFFER,
-                gl_draw.resource_list[self.index_buffer.buffer_id as usize],
+                gl_draw.resource_list[self.index_buffer as usize],
             );
             gl.BindBuffer(gl::ARRAY_BUFFER, 0);
             add_vao(self.id, vao);
@@ -392,7 +448,7 @@ unsafe impl<T: ShaderArgs> Mesh<T> for IndexMesh<T> {
     }
 }
 
-impl<T: ShaderArgs> Drop for IndexMesh<T> {
+impl<'a, T: ShaderArgs> Drop for IndexMesh<'a, T> {
     fn drop(&mut self) {
         unsafe {
             clear_vaos(self.id);
@@ -407,7 +463,7 @@ pub struct VertexBuffer<T: GlDataType> {
 }
 
 impl<T: GlDataType> VertexBuffer<T> {
-    pub fn new<K>(_context: K, data: &[T]) -> VertexBuffer<T> {
+    pub fn new(_context: ContextKey, data: &[T]) -> VertexBuffer<T> {
         unsafe {
             // note: we could take the gl from the window, but that window is
             // not necessarily the active window. If some window exists, then there
@@ -440,6 +496,14 @@ impl<T: GlDataType> VertexBuffer<T> {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.buffer.buffer_len / mem::size_of::<T>()
+    }
+
+    pub fn num_bytes(&self) -> usize {
+        self.buffer.buffer_len
+    }
+
     pub fn retype<'a, S: GlDataType>(&'a self) -> &'a VertexBuffer<S> {
         // a vertex buffer always has the same layout regardless of type
         unsafe { mem::transmute::<&'a VertexBuffer<T>, &'a VertexBuffer<S>>(self) }
@@ -463,48 +527,570 @@ impl<T: GlDataType> VertexBuffer<T> {
     }
 }
 
-pub unsafe trait InterfaceBinding {
-    type Bind: ShaderArgs;
-
-    unsafe fn bind_all_to_vao(self, gl: &Gl, location: u32);
+pub struct BufferBinding<'a, T: ArgParameter<TransparentArgs>> {
+    binding: MeshBufferBinding,
+    len: usize,
+    phantom: PhantomData<std::rc::Rc<&'a T>>,
 }
 
-unsafe impl<T: ArgType + ArgParameter<TransparentArgs>, B: BindBuffer<T>> InterfaceBinding
-    for BufferBinding<T, B>
-where
-    (T,): ShaderArgs,
-{
-    type Bind = (T,);
-
-    unsafe fn bind_all_to_vao(self, gl: &Gl, location: u32) {
-        self.binding.bind_to_vao(gl, location);
+impl<'a, T: ArgType + ArgParameter<TransparentArgs>> Clone for BufferBinding<'a, T> {
+    fn clone(&self) -> BufferBinding<'a, T> {
+        BufferBinding {
+            binding: self.binding,
+            len: self.len,
+            phantom: PhantomData,
+        }
     }
 }
 
-unsafe impl InterfaceBinding for () {
-    type Bind = ();
+impl<'a, T: ArgType + ArgParameter<TransparentArgs>> Copy for BufferBinding<'a, T> {}
 
-    unsafe fn bind_all_to_vao(self, _gl: &Gl, _location: u32) {
-        // don't do anything
+pub struct OwnedBufferBinding<T: ArgParameter<TransparentArgs>> {
+    binding: MeshBufferBinding,
+    buffer: Buffer,
+    phantom: PhantomData<T>,
+}
+
+pub unsafe trait IntoMesh {
+    type Args: ShaderArgsClass<TransparentArgs>;
+
+    fn add_bindings(
+        self,
+        bindings: &mut Vec<MeshBufferBinding>,
+        to_drop: &mut Vec<Buffer>,
+    ) -> (u32, u32);
+}
+
+unsafe impl IntoMesh for () {
+    type Args = ();
+
+    #[allow(unused)]
+    #[inline(always)]
+    fn add_bindings(
+        self,
+        _bindings: &mut Vec<MeshBufferBinding>,
+        _to_drop: &mut Vec<Buffer>,
+    ) -> (u32, u32) {
+        (std::u32::MAX, std::u32::MAX)
     }
 }
 
-unsafe impl<
-        S: ArgType + ArgParameter<TransparentArgs>,
-        B: BindBuffer<S>,
-        R: InterfaceBinding,
-        T: RemoveFront<Front = BufferBinding<S, B>, Remaining = R>,
-    > InterfaceBinding for T
-where
-    R::Bind: AttachFront<S>,
-    <R::Bind as AttachFront<S>>::AttachFront: ShaderArgs,
-{
-    type Bind = <R::Bind as AttachFront<S>>::AttachFront;
+unsafe impl<'a, T: ArgParameter<TransparentArgs>> IntoMesh for BufferBinding<'a, T> {
+    type Args = (T,);
 
-    unsafe fn bind_all_to_vao(self, gl: &Gl, location: u32) {
+    #[inline]
+    fn add_bindings(
+        self,
+        bindings: &mut Vec<MeshBufferBinding>,
+        _to_drop: &mut Vec<Buffer>,
+    ) -> (u32, u32) {
+        bindings.push(self.binding);
+        get_mesh_size(self.binding, self.len)
+    }
+}
+
+unsafe impl<T: ArgParameter<TransparentArgs>> IntoMesh for OwnedBufferBinding<T> {
+    type Args = (T,);
+
+    #[inline]
+    fn add_bindings(
+        self,
+        bindings: &mut Vec<MeshBufferBinding>,
+        to_drop: &mut Vec<Buffer>,
+    ) -> (u32, u32) {
+        bindings.push(self.binding);
+        let len = self.buffer.buffer_len;
+        to_drop.push(self.buffer);
+        get_mesh_size(self.binding, len)
+    }
+}
+
+unsafe impl<T: RemoveFront> IntoMesh for T
+where
+    T::Remaining: IntoMesh,
+    T::Front: IntoMesh,
+    <T::Front as IntoMesh>::Args: RemoveFront<Remaining = ()>,
+    <T::Remaining as IntoMesh>::Args:
+        AttachFront<<<T::Front as IntoMesh>::Args as RemoveFront>::Front>,
+    <<T::Remaining as IntoMesh>::Args as AttachFront<
+        <<T::Front as IntoMesh>::Args as RemoveFront>::Front,
+    >>::AttachFront: ShaderArgsClass<TransparentArgs>,
+{
+    type Args = <<T::Remaining as IntoMesh>::Args as AttachFront<
+        <<T::Front as IntoMesh>::Args as RemoveFront>::Front,
+    >>::AttachFront;
+
+    #[inline]
+    fn add_bindings(
+        self,
+        bindings: &mut Vec<MeshBufferBinding>,
+        to_drop: &mut Vec<Buffer>,
+    ) -> (u32, u32) {
         let (front, remaining) = self.remove_front();
-        front.binding.bind_to_vao(gl, location);
-        remaining.bind_all_to_vao(gl, location + S::get_param().num_input_locations);
+        let size1 = front.add_bindings(bindings, to_drop);
+        let size2 = remaining.add_bindings(bindings, to_drop);
+        (
+            std::cmp::min(size1.0, size2.0),
+            std::cmp::min(size1.1, size2.1),
+        )
+    }
+}
+
+fn wrap<'a, T: ArgType + ArgParameter<TransparentArgs>>(
+    binding: MeshBufferBinding,
+    len: usize,
+) -> BufferBinding<'a, T> {
+    BufferBinding {
+        binding: binding,
+        len: len,
+        phantom: PhantomData,
+    }
+}
+
+fn wrap_owned<T: ArgType + ArgParameter<TransparentArgs>>(
+    binding: MeshBufferBinding,
+    buffer: Buffer,
+) -> OwnedBufferBinding<T> {
+    OwnedBufferBinding {
+        binding: binding,
+        buffer: buffer,
+        phantom: PhantomData,
+    }
+}
+
+impl<T: IntType> VertexBuffer<T> {
+    pub fn int_binding_ref<
+        'a,
+        C: TupleIndex<(T::Binding1, T::Binding2, T::Binding3, T::Binding4)>,
+    >(
+        &'a self,
+        _components: C,
+        offset: Option<u32>,
+        stride: Option<u32>,
+        instance_divisor: Option<u16>,
+    ) -> BufferBinding<'a, C::I>
+    where
+        C::I: ArgType + ArgParameter<TransparentArgs>,
+    {
+        let bid = self.buffer.buffer_id;
+        let off = if let Some(o) = offset { o } else { 0 };
+        let stride = if let Some(s) = stride { s } else { 0 };
+        let div = if let Some(d) = instance_divisor { d } else { 0 };
+        let b = MeshBufferBinding {
+            buffer: bid,
+            size: (C::N + 1) as u8,
+            instance_divisor: div,
+            // 16 = int
+            btype: 16 + T::ENUM,
+            offset: off,
+            stride: stride,
+        };
+
+        wrap(b, self.buffer.buffer_len)
+    }
+
+    pub fn int_binding<'a, C: TupleIndex<(T::Binding1, T::Binding2, T::Binding3, T::Binding4)>>(
+        self,
+        _components: C,
+        offset: Option<u32>,
+        stride: Option<u32>,
+        instance_divisor: Option<u16>,
+    ) -> OwnedBufferBinding<C::I>
+    where
+        C::I: ArgType + ArgParameter<TransparentArgs>,
+    {
+        let bid = self.buffer.buffer_id;
+        let off = if let Some(o) = offset { o } else { 0 };
+        let stride = if let Some(s) = stride { s } else { 0 };
+        let div = if let Some(d) = instance_divisor { d } else { 0 };
+        let b = MeshBufferBinding {
+            buffer: bid,
+            size: (C::N + 1) as u8,
+            instance_divisor: div,
+            // 16 = int
+            btype: 16 + T::ENUM,
+            offset: off,
+            stride: stride,
+        };
+
+        wrap_owned(b, self.buffer)
+    }
+
+    pub fn float_binding_ref<'a, C: TupleIndex<(Float, Float2, Float3, Float4)>>(
+        &'a self,
+        _components: C,
+        offset: Option<u32>,
+        stride: Option<u32>,
+        instance_divisor: Option<u16>,
+    ) -> BufferBinding<'a, C::I>
+    where
+        C::I: ArgType + ArgParameter<TransparentArgs>,
+    {
+        let bid = self.buffer.buffer_id;
+        let off = if let Some(o) = offset { o } else { 0 };
+        let stride = if let Some(s) = stride { s } else { 0 };
+        let div = if let Some(d) = instance_divisor { d } else { 0 };
+        let b = MeshBufferBinding {
+            buffer: bid,
+            size: (C::N + 1) as u8,
+            instance_divisor: div,
+            // 0 = float, unnormed
+            btype: 0 + T::ENUM,
+            offset: off,
+            stride: stride,
+        };
+
+        wrap(b, self.buffer.buffer_len)
+    }
+
+    pub fn float_binding<C: TupleIndex<(Float, Float2, Float3, Float4)>>(
+        self,
+        _components: C,
+        offset: Option<u32>,
+        stride: Option<u32>,
+        instance_divisor: Option<u16>,
+    ) -> OwnedBufferBinding<C::I>
+    where
+        C::I: ArgType + ArgParameter<TransparentArgs>,
+    {
+        let bid = self.buffer.buffer_id;
+        let off = if let Some(o) = offset { o } else { 0 };
+        let stride = if let Some(s) = stride { s } else { 0 };
+        let div = if let Some(d) = instance_divisor { d } else { 0 };
+        let b = MeshBufferBinding {
+            buffer: bid,
+            size: (C::N + 1) as u8,
+            instance_divisor: div,
+            // 0 = float, unnormed
+            btype: 0 + T::ENUM,
+            offset: off,
+            stride: stride,
+        };
+
+        wrap_owned(b, self.buffer)
+    }
+
+    pub fn norm_float_binding_ref<'a, C: TupleIndex<(Float, Float2, Float3, Float4)>>(
+        &'a self,
+        _components: C,
+        offset: Option<u32>,
+        stride: Option<u32>,
+        instance_divisor: Option<u16>,
+    ) -> BufferBinding<'a, C::I>
+    where
+        C::I: ArgType + ArgParameter<TransparentArgs>,
+    {
+        let bid = self.buffer.buffer_id;
+        let off = if let Some(o) = offset { o } else { 0 };
+        let stride = if let Some(s) = stride { s } else { 0 };
+        let div = if let Some(d) = instance_divisor { d } else { 0 };
+        let b = MeshBufferBinding {
+            buffer: bid,
+            size: (C::N + 1) as u8,
+            instance_divisor: div,
+            // 8 = float, normed
+            btype: 8 + T::ENUM,
+            offset: off,
+            stride: stride,
+        };
+
+        wrap(b, self.buffer.buffer_len)
+    }
+
+    pub fn norm_float_binding<C: TupleIndex<(Float, Float2, Float3, Float4)>>(
+        self,
+        _components: C,
+        offset: Option<u32>,
+        stride: Option<u32>,
+        instance_divisor: Option<u16>,
+    ) -> OwnedBufferBinding<C::I>
+    where
+        C::I: ArgType + ArgParameter<TransparentArgs>,
+    {
+        let bid = self.buffer.buffer_id;
+        let off = if let Some(o) = offset { o } else { 0 };
+        let stride = if let Some(s) = stride { s } else { 0 };
+        let div = if let Some(d) = instance_divisor { d } else { 0 };
+        let b = MeshBufferBinding {
+            buffer: bid,
+            size: (C::N + 1) as u8,
+            instance_divisor: div,
+            // 8 = float, normed
+            btype: 8 + T::ENUM,
+            offset: off,
+            stride: stride,
+        };
+
+        wrap_owned(b, self.buffer)
+    }
+}
+
+impl VertexBuffer<f32> {
+    pub fn binding_ref<'a, C: TupleIndex<(Float, Float2, Float3, Float4)>>(
+        &'a self,
+        _components: C,
+        offset: Option<u32>,
+        stride: Option<u32>,
+        instance_divisor: Option<u16>,
+    ) -> BufferBinding<'a, C::I>
+    where
+        C::I: ArgType + ArgParameter<TransparentArgs>,
+    {
+        let bid = self.buffer.buffer_id;
+        let off = if let Some(o) = offset { o } else { 0 };
+        let stride = if let Some(s) = stride { s } else { 0 };
+        let div = if let Some(d) = instance_divisor { d } else { 0 };
+        let b = MeshBufferBinding {
+            buffer: bid,
+            // a f32 is 4 byte
+            size: (C::N + 1) as u8,
+            instance_divisor: div,
+            // 6 = Float
+            btype: 6,
+            offset: off,
+            stride: stride,
+        };
+
+        wrap(b, self.buffer.buffer_len)
+    }
+
+    pub fn binding<C: TupleIndex<(Float, Float2, Float3, Float4)>>(
+        self,
+        _components: C,
+        offset: Option<u32>,
+        stride: Option<u32>,
+        instance_divisor: Option<u16>,
+    ) -> OwnedBufferBinding<C::I>
+    where
+        C::I: ArgType + ArgParameter<TransparentArgs>,
+    {
+        let bid = self.buffer.buffer_id;
+        let off = if let Some(o) = offset { o } else { 0 };
+        let stride = if let Some(s) = stride { s } else { 0 };
+        let div = if let Some(d) = instance_divisor { d } else { 0 };
+        let b = MeshBufferBinding {
+            buffer: bid,
+            size: (C::N + 1) as u8,
+            instance_divisor: div,
+            // 6 = Float
+            btype: 6,
+            offset: off,
+            stride: stride,
+        };
+
+        wrap_owned(b, self.buffer)
+    }
+}
+
+use crate::tuple;
+
+pub const ONE: tuple::T0 = tuple::I0;
+
+pub const TWO: tuple::T1 = tuple::I1;
+
+pub const THREE: tuple::T2 = tuple::I2;
+
+pub const FOUR: tuple::T3 = tuple::I3;
+
+pub unsafe trait IntType: GlDataType {
+    type Binding1;
+    type Binding2;
+    type Binding3;
+    type Binding4;
+    const ENUM: u8;
+}
+
+unsafe impl IntType for u8 {
+    type Binding1 = UInt;
+    type Binding2 = UInt2;
+    type Binding3 = UInt3;
+    type Binding4 = UInt4;
+    const ENUM: u8 = 0;
+}
+
+unsafe impl IntType for u16 {
+    type Binding1 = UInt;
+    type Binding2 = UInt2;
+    type Binding3 = UInt3;
+    type Binding4 = UInt4;
+    const ENUM: u8 = 1;
+}
+
+unsafe impl IntType for u32 {
+    type Binding1 = UInt;
+    type Binding2 = UInt2;
+    type Binding3 = UInt3;
+    type Binding4 = UInt4;
+    const ENUM: u8 = 2;
+}
+
+unsafe impl IntType for i8 {
+    type Binding1 = Int;
+    type Binding2 = Int2;
+    type Binding3 = Int3;
+    type Binding4 = Int4;
+    const ENUM: u8 = 3;
+}
+
+unsafe impl IntType for i16 {
+    type Binding1 = Int;
+    type Binding2 = Int2;
+    type Binding3 = Int3;
+    type Binding4 = Int4;
+    const ENUM: u8 = 4;
+}
+
+unsafe impl IntType for i32 {
+    type Binding1 = Int;
+    type Binding2 = Int2;
+    type Binding3 = Int3;
+    type Binding4 = Int4;
+    const ENUM: u8 = 5;
+}
+
+pub unsafe trait IndexType: GlDataType {}
+
+unsafe impl IndexType for u8 {}
+
+unsafe impl IndexType for u16 {}
+
+unsafe impl IndexType for u32 {}
+
+pub struct ElementBuffer<T: IndexType> {
+    buffer: Buffer,
+    phantom: PhantomData<T>,
+}
+
+impl<T: IndexType> ElementBuffer<T> {
+    pub fn new(buffer: Buffer) -> ElementBuffer<T> {
+        ElementBuffer {
+            buffer: buffer,
+            phantom: PhantomData,
+        }
+    }
+
+    pub fn into_inner(self) -> Buffer {
+        self.buffer
+    }
+
+    pub fn buffer_ref(&self) -> &Buffer {
+        &self.buffer
+    }
+}
+
+/// A generic buffer that can hold any type of data.
+///
+/// Buffers in opengl fundamentally don't care about what type of data is in them (this is
+/// different from textures, which have a specific, implementation defined, type and format).
+pub struct Buffer {
+    pub(crate) buffer_id: u32,
+    // the size in bytes of the buffer.
+    buffer_len: usize,
+    // like all gl resources, a buffer cannot be used on different threads
+    phantom: PhantomData<std::rc::Rc<()>>,
+}
+
+impl Buffer {
+    #[inline]
+    pub fn get_id(&self) -> u32 {
+        self.buffer_id
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.buffer_len
+    }
+}
+
+impl GlResource for Buffer {
+    unsafe fn adopt(ptr: *mut (), id: u32) -> Option<*mut ()> {
+        // it isn't really worth aligning the pointer
+        let len = ptr::read_unaligned(ptr as *const u64);
+        let hints = ptr::read_unaligned((ptr as *const u64).offset(1));
+        let buffer_type_hint = (hints & 0xFF) as u32;
+        let buffer_use_hint = (hints >> 32) as u32;
+        let mut buffer = 0;
+        gl::with_current(|gl| {
+            gl.GenBuffers(1, &mut buffer);
+            // in theory, implementations might use the target to make optimizations
+            gl.BindBuffer(buffer_type_hint, buffer);
+            gl.BufferData(
+                buffer_type_hint,
+                len as isize,
+                (ptr as *const u64).offset(2) as *const _,
+                buffer_use_hint,
+            );
+            gl.BindBuffer(buffer_type_hint, 0);
+        });
+
+        inner_gl_unsafe().resource_list[id as usize] = buffer;
+
+        let _drop_vec = Vec::from_raw_parts(ptr as *mut u8, len as usize + 8, len as usize + 8);
+
+        // note: the pointer no longer actually points to data, instead it stores two u32s
+        // that represent the buffer type and usage.
+        if cfg!(target_pointer_width = "64") {
+            Some(hints as *mut ())
+        } else if cfg!(target_pointer_width = "32") {
+            Some(buffer_type_hint as *mut ())
+        } else {
+            panic!("Supported pointer widths are 32 and 64 bits.");
+        }
+    }
+
+    unsafe fn drop_while_orphaned(ptr: *mut (), _id: u32) {
+        let len = ptr::read_unaligned(ptr as *const u64);
+        let _drop_vec = Vec::from_raw_parts(ptr as *mut u8, len as usize + 8, len as usize + 8);
+    }
+
+    unsafe fn cleanup(_ptr: *mut (), _id: u32) {
+        // no cleanup neccessary since no heap allocated memory is used when not orphaned
+    }
+
+    unsafe fn orphan(id: u32, ptr: *mut ()) -> *mut () {
+        gl::with_current(|gl| {
+            let buffer = inner_gl_unsafe_static().resource_list[id as usize];
+            gl.BindBuffer(gl::ARRAY_BUFFER, buffer);
+            let hints = if cfg!(target_pointer_width = "64") {
+                ptr as u64
+            } else if cfg!(target_pointer_width = "32") {
+                let mut h = 0;
+                gl.GetBufferParameteriv(gl::ARRAY_BUFFER, gl::BUFFER_USAGE, &mut h);
+                (h << 32) as u64 + ptr as u64
+            } else {
+                panic!("Supported pointer widths are 32 and 64 bits.");
+            };
+            let mut len = 0;
+            gl.GetBufferParameteri64v(gl::ARRAY_BUFFER, gl::BUFFER_SIZE, &mut len);
+
+            let mut data_vec = Vec::<u8>::with_capacity(len as usize + 8);
+            let ptr = data_vec.as_mut_ptr();
+            mem::forget(data_vec);
+
+            ptr::write_unaligned(ptr as *mut u64, len as u64);
+            ptr::write_unaligned((ptr as *mut u64).offset(1), hints);
+
+            gl.GetBufferSubData(
+                gl::ARRAY_BUFFER,
+                0,
+                len as isize,
+                (ptr as *mut u64).offset(2) as *mut _,
+            );
+            gl.BindBuffer(gl::ARRAY_BUFFER, 0);
+
+            ptr as *mut ()
+        })
+    }
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        let gl_draw = unsafe { inner_gl_unsafe() };
+        unsafe {
+            let b = gl_draw.resource_list[self.buffer_id as usize];
+            gl::with_current(|gl| gl.DeleteBuffers(1, &b));
+        }
+        gl_draw.remove_resource(self.buffer_id);
     }
 }
 
@@ -726,392 +1312,4 @@ pub mod uniform {
     set_uniform!(;;na::Matrix4x2<f32>, Float4x2);
     set_uniform!(;;na::Matrix4x3<f32>, Float4x3);
     set_uniform!(;;na::Matrix4<f32>, Float4x4);
-}
-
-#[derive(Clone, Copy)]
-pub struct BufferBinding<T: ArgType + ArgParameter<TransparentArgs>, B: BindBuffer<T>> {
-    binding: B,
-    phantom: PhantomData<T>,
-}
-
-pub unsafe trait BindBuffer<T: ArgType + ArgParameter<TransparentArgs>> {
-    /// Binds the buffer (or in the case of matrix types, buffers) to the
-    /// currently active VAO, setting the vertex attribute pointer.
-
-    /// This function should not enable that attribute. This function should bind
-    /// a buffer to gl::ARRAY_BUFFER, and the caller of this function is responsible
-    /// for binding 0 to gl::ARRAY_BUFFER after it is done calling it.
-    unsafe fn bind_to_vao(&self, gl: &Gl, location: u32);
-}
-
-fn wrap<T: ArgType + ArgParameter<TransparentArgs>, B: BindBuffer<T>>(
-    binding: B,
-) -> BufferBinding<T, B> {
-    BufferBinding {
-        binding: binding,
-        phantom: PhantomData,
-    }
-}
-
-pub struct VecBufferBinding<'a, T: ArgType + ArgParameter<TransparentArgs>> {
-    buffer: GLuint,
-    // 0 - normed float
-    // 1 - unnormed float
-    // 2 - int
-    int_norm: u8,
-    comps: u8,
-
-    ty: GLenum,
-
-    offset: u32,
-    stride: u32,
-    // the number of indices in the bound buffer
-    len: usize,
-    phantom: PhantomData<&'a T>,
-}
-
-impl<'a, T: ArgType + ArgParameter<TransparentArgs>> Copy for VecBufferBinding<'a, T> {}
-
-impl<'a, T: ArgType + ArgParameter<TransparentArgs>> Clone for VecBufferBinding<'a, T> {
-    fn clone(&self) -> VecBufferBinding<'a, T> {
-        *self
-    }
-}
-
-unsafe impl<'a, T: ArgType + ArgParameter<TransparentArgs>> BindBuffer<T>
-    for VecBufferBinding<'a, T>
-{
-    unsafe fn bind_to_vao(&self, gl: &Gl, location: u32) {
-        gl.BindBuffer(gl::ARRAY_BUFFER, self.buffer);
-        if self.int_norm == 2 {
-            gl.VertexAttribIPointer(
-                location,
-                self.comps as i32,
-                self.ty,
-                self.stride as i32,
-                self.offset as *mut _,
-            );
-        } else {
-            let norm = if self.int_norm < 1 {
-                gl::TRUE
-            } else {
-                gl::FALSE
-            };
-            gl.VertexAttribPointer(
-                location,
-                self.comps as i32,
-                self.ty,
-                norm,
-                self.stride as i32,
-                self.offset as *mut _,
-            );
-        };
-    }
-}
-
-impl<'a, T: ArgType + ArgParameter<TransparentArgs>> VecBufferBinding<'a, T> {
-    fn new<S: GlDataType>(
-        buffer: GLuint,
-        int_norm: u8,
-        offset: Option<u32>,
-        stride: Option<u32>,
-        comps: usize,
-        len: usize,
-    ) -> VecBufferBinding<'a, T> {
-        let s = mem::size_of::<S>();
-        let offset = if let Some(off) = offset {
-            if off as usize > len {
-                panic!("Offset {} is longer than length {}.", off, len);
-            }
-            off
-        } else {
-            0
-        };
-        let stride = if let Some(st) = stride {
-            st
-        } else {
-            // note: this can never be larger than u32::MAX
-            (comps * s) as u32
-        };
-
-        let num_elements = if len - offset as usize >= comps * s {
-            (len - offset as usize - comps * s) / stride as usize + 1
-        } else {
-            0
-        };
-
-        VecBufferBinding {
-            buffer: buffer,
-            int_norm: int_norm,
-            comps: comps as u8,
-
-            ty: S::TYPE,
-
-            offset: offset,
-            stride: stride,
-
-            len: num_elements,
-
-            phantom: PhantomData,
-        }
-    }
-}
-
-impl<T: IntType> VertexBuffer<T> {
-    pub fn int_binding<'a, C: TupleIndex<(T::Binding1, T::Binding2, T::Binding3, T::Binding4)>>(
-        &'a self,
-        _components: C,
-        offset: Option<u32>,
-        stride: Option<u32>,
-    ) -> BufferBinding<C::I, VecBufferBinding<'a, C::I>>
-    where
-        C::I: ArgType + ArgParameter<TransparentArgs>,
-    {
-        wrap(VecBufferBinding::new::<T>(
-            unsafe { inner_gl_unsafe_static().resource_list[self.buffer.buffer_id as usize] },
-            2,
-            offset,
-            stride,
-            C::N,
-            self.buffer.buffer_len,
-        ))
-    }
-
-    pub fn float_binding<'a, C: TupleIndex<(Float, Float2, Float3, Float4)>>(
-        &'a self,
-        _components: C,
-        offset: Option<u32>,
-        stride: Option<u32>,
-    ) -> BufferBinding<C::I, VecBufferBinding<'a, C::I>>
-    where
-        C::I: ArgType + ArgParameter<TransparentArgs>,
-    {
-        wrap(VecBufferBinding::new::<T>(
-            unsafe { inner_gl_unsafe_static().resource_list[self.buffer.buffer_id as usize] },
-            1,
-            offset,
-            stride,
-            C::N,
-            self.buffer.buffer_len,
-        ))
-    }
-
-    pub fn norm_float_binding<'a, C: TupleIndex<(Float, Float2, Float3, Float4)>>(
-        &'a self,
-        _components: C,
-        offset: Option<u32>,
-        stride: Option<u32>,
-    ) -> BufferBinding<C::I, VecBufferBinding<'a, C::I>>
-    where
-        C::I: ArgType + ArgParameter<TransparentArgs>,
-    {
-        wrap(VecBufferBinding::new::<T>(
-            unsafe { inner_gl_unsafe_static().resource_list[self.buffer.buffer_id as usize] },
-            0,
-            offset,
-            stride,
-            C::N,
-            self.buffer.buffer_len,
-        ))
-    }
-}
-
-impl VertexBuffer<f32> {
-    pub fn binding<'a, C: TupleIndex<(Float, Float2, Float3, Float4)>>(
-        &'a self,
-        _components: C,
-        offset: Option<u32>,
-        stride: Option<u32>,
-    ) -> BufferBinding<C::I, VecBufferBinding<'a, C::I>>
-    where
-        C::I: ArgType + ArgParameter<TransparentArgs>,
-    {
-        wrap(VecBufferBinding::new::<f32>(
-            unsafe { inner_gl_unsafe_static().resource_list[self.buffer.buffer_id as usize] },
-            1,
-            offset,
-            stride,
-            C::N,
-            self.buffer.buffer_len,
-        ))
-    }
-}
-
-pub unsafe trait IntType: GlDataType {
-    type Binding1;
-    type Binding2;
-    type Binding3;
-    type Binding4;
-}
-
-unsafe impl IntType for u8 {
-    type Binding1 = UInt;
-    type Binding2 = UInt2;
-    type Binding3 = UInt3;
-    type Binding4 = UInt4;
-}
-
-unsafe impl IntType for u16 {
-    type Binding1 = UInt;
-    type Binding2 = UInt2;
-    type Binding3 = UInt3;
-    type Binding4 = UInt4;
-}
-
-unsafe impl IntType for u32 {
-    type Binding1 = UInt;
-    type Binding2 = UInt2;
-    type Binding3 = UInt3;
-    type Binding4 = UInt4;
-}
-
-unsafe impl IntType for i8 {
-    type Binding1 = Int;
-    type Binding2 = Int2;
-    type Binding3 = Int3;
-    type Binding4 = Int4;
-}
-
-unsafe impl IntType for i16 {
-    type Binding1 = Int;
-    type Binding2 = Int2;
-    type Binding3 = Int3;
-    type Binding4 = Int4;
-}
-
-unsafe impl IntType for i32 {
-    type Binding1 = Int;
-    type Binding2 = Int2;
-    type Binding3 = Int3;
-    type Binding4 = Int4;
-}
-
-pub unsafe trait IndexType: GlDataType {}
-
-unsafe impl IndexType for u8 {}
-
-unsafe impl IndexType for u16 {}
-
-unsafe impl IndexType for u32 {}
-
-pub struct ElementBuffer<T: IndexType> {
-    buffer: Buffer,
-    phantom: PhantomData<T>,
-}
-
-impl<T: IndexType> ElementBuffer<T> {
-    pub fn new(buffer: Buffer) -> ElementBuffer<T> {
-        ElementBuffer {
-            buffer: buffer,
-            phantom: PhantomData,
-        }
-    }
-
-    pub fn into_inner(self) -> Buffer {
-        self.buffer
-    }
-
-    pub fn buffer_ref(&self) -> &Buffer {
-        &self.buffer
-    }
-}
-
-/// A generic buffer that can hold any type of data.
-///
-/// Buffers in opengl fundamentally don't care about what type of data is in them (this is
-/// different from textures, which have a specific, implementation defined, type and format).
-pub struct Buffer {
-    pub(crate) buffer_id: u32,
-    // the size in bytes of the buffer.
-    buffer_len: usize,
-    // like all gl resources, a buffer cannot be used on different threads
-    phantom: PhantomData<std::rc::Rc<()>>,
-}
-
-impl GlResource for Buffer {
-    unsafe fn adopt(ptr: *mut (), id: u32) -> Option<*mut ()> {
-        // it isn't really worth aligning the pointer
-        let len = ptr::read_unaligned(ptr as *const u64);
-        let hints = ptr::read_unaligned((ptr as *const u64).offset(1));
-        let buffer_type_hint = (hints & 0xFF) as u32;
-        let buffer_use_hint = (hints >> 32) as u32;
-        let mut buffer = 0;
-        gl::with_current(|gl| {
-            gl.GenBuffers(1, &mut buffer);
-            // in theory, implementations might use the target to make optimizations
-            gl.BindBuffer(buffer_type_hint, buffer);
-            gl.BufferData(
-                buffer_type_hint,
-                len as isize,
-                (ptr as *const u64).offset(2) as *const _,
-                buffer_use_hint,
-            );
-            gl.BindBuffer(buffer_type_hint, 0);
-        });
-
-        inner_gl_unsafe().resource_list[id as usize] = buffer;
-
-        let _drop_vec = Vec::from_raw_parts(ptr as *mut u8, len as usize + 8, len as usize + 8);
-
-        // note: the pointer no longer actually points to data, instead it stores two u32s
-        // that represent the buffer type and usage.
-        if cfg!(target_pointer_width = "64") {
-            Some(hints as *mut ())
-        } else if cfg!(target_pointer_width = "32") {
-            Some(buffer_type_hint as *mut ())
-        } else {
-            panic!("Supported pointer widths are 32 and 64 bits.");
-        }
-    }
-
-    unsafe fn drop_while_orphaned(ptr: *mut (), _id: u32) {
-        let len = ptr::read_unaligned(ptr as *const u64);
-        let _drop_vec = Vec::from_raw_parts(ptr as *mut u8, len as usize + 8, len as usize + 8);
-    }
-
-    unsafe fn cleanup(_ptr: *mut (), _id: u32) {
-        // no cleanup neccessary since no heap allocated memory is used when not orphaned
-    }
-
-    unsafe fn orphan(id: u32, ptr: *mut ()) -> *mut () {
-        gl::with_current(|gl| {
-            let buffer = inner_gl_unsafe_static().resource_list[id as usize];
-            gl.BindBuffer(gl::ARRAY_BUFFER, buffer);
-            let hints = if cfg!(target_pointer_width = "64") {
-                ptr as u64
-            } else if cfg!(target_pointer_width = "32") {
-                let mut h = 0;
-                gl.GetBufferParameteriv(gl::ARRAY_BUFFER, gl::BUFFER_USAGE, &mut h);
-                (h << 32) as u64 + ptr as u64
-            } else {
-                panic!("Supported pointer widths are 32 and 64 bits.");
-            };
-            let mut len = 0;
-            gl.GetBufferParameteri64v(gl::ARRAY_BUFFER, gl::BUFFER_SIZE, &mut len);
-
-            let mut data_vec = Vec::<u8>::with_capacity(len as usize + 8);
-            let ptr = data_vec.as_mut_ptr();
-            mem::forget(data_vec);
-
-            ptr::write_unaligned(ptr as *mut u64, len as u64);
-            ptr::write_unaligned((ptr as *mut u64).offset(1), hints);
-
-            gl.GetBufferSubData(
-                gl::ARRAY_BUFFER,
-                0,
-                len as isize,
-                (ptr as *mut u64).offset(2) as *mut _,
-            );
-            gl.BindBuffer(gl::ARRAY_BUFFER, 0);
-
-            ptr as *mut ()
-        })
-    }
-}
-
-impl Drop for Buffer {
-    fn drop(&mut self) {
-        let gl_draw = unsafe { inner_gl_unsafe() };
-        gl_draw.remove_resource(self.buffer_id);
-    }
 }
