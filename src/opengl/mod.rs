@@ -708,6 +708,10 @@ impl<'a> WindowSurface<'a> {
         self.window.get_scale()
     }
 
+    pub fn get_keys(&self, keys: &[Key], dst: &mut [u8]) {
+        self.window.get_keys(keys, dst);
+    }
+
     #[inline]
     pub fn key_is_down(&self, key: Key) -> bool {
         self.window.key_is_down(key)
@@ -778,6 +782,30 @@ impl GlWindow {
     #[inline]
     pub fn get_scale(&self) -> i32 {
         self.scale.get()
+    }
+
+    #[inline]
+    pub fn get_keys(&self, keys: &[Key], dst: &mut [u8]) {
+        let window_data =
+            unsafe { &mut *(glfw_raw::glfwGetWindowUserPointer(self.ptr) as *mut WindowData) };
+        for (i, key) in keys.iter().enumerate() {
+            let last_press = window_data.last_press[*key as usize];
+            let last_release = window_data.last_release[*key as usize];
+            let last_typed = window_data.last_typed[*key as usize];
+            dst[i] = 0;
+            if last_press > last_release || last_release == window_data.frame {
+                dst[i] |= 0b1;
+            }
+            if last_press == window_data.frame {
+                dst[i] |= 0b10;
+            }
+            if last_release == window_data.frame {
+                dst[i] |= 0b100;
+            }
+            if last_typed == window_data.frame {
+                dst[i] |= 0b1000;
+            }
+        }
     }
 
     #[inline]

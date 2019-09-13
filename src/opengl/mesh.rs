@@ -409,6 +409,23 @@ impl ArrayDrawer {
             gl::with_current(|gl| gl.DrawArrays(self.mode, start as i32, count as i32));
         }
     }
+
+    pub fn draw_instanced(&self, start: u32, count: u32, instances: u32) {
+        if cfg!(feature = "draw_call_bounds_checks") {
+            if (start + count) > self.num_indices {
+                panic!(
+                    "The smallest array in the mesh has {} elements, but the draw call requires {}.",
+                    self.num_indices, start + count
+                );
+            }
+            if instances > self.num_instances {
+                panic!("The mesh has {} instances but the draw call requires {}.", self.num_instances, instances);
+            }
+        }
+        unsafe {
+            gl::with_current(|gl| gl.DrawArraysInstanced(self.mode, start as i32, count as i32, instances as i32));
+        }
+    }
 }
 
 unsafe impl<'a, T: ShaderArgs> Mesh<T> for ArrayMesh<'a, T> {
@@ -526,9 +543,6 @@ pub struct VertexBuffer<T: GlDataType> {
 impl<T: GlDataType> VertexBuffer<T> {
     pub fn new(_context: ContextKey, data: &[T]) -> VertexBuffer<T> {
         unsafe {
-            // note: we could take the gl from the window, but that window is
-            // not necessarily the active window. If some window exists, then there
-            // is an active window
             gl::with_current(|gl| {
                 let mut buffer = 0;
                 gl.GenBuffers(1, &mut buffer);
