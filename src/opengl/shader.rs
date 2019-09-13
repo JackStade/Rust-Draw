@@ -482,6 +482,16 @@ pub mod builtin_vars {
             }
         }
 
+        pub fn discard<T: ItemType<'a, Ty = Boolean>>(discard: T) -> BuiltInFragOutputs<'a> {
+            unsafe {
+                BuiltInFragOutputs {
+                    depth: None,
+                    discard: Some(discard.as_string()),
+                    phantom: PhantomData,
+                }
+            }
+        }
+
         pub fn create<T: BuiltInOutput<'a, Float>, S: BuiltInOutput<'a, Boolean>>(
             depth: T,
             discard: S,
@@ -1279,7 +1289,7 @@ where
                 in_str,
                 i,
             );
-            position += In::get_param(i).num_input_locations;
+            position += In::get_param(i).num_locations;
         } else {
             shader = format!("{}in {} {}{};\n", shader, in_args[i].gl_type(), in_str, i,);
         }
@@ -1765,12 +1775,12 @@ pub mod traits {
         fn get_param() {}
     }
 
-    /// Most arg types, but not opaque types like samplers.
+    /// Most arg types, but not opaque types like samplers. For our purposes,
+    /// vectors of booleans are considered opaque.
     #[derive(Clone, Copy)]
     pub struct TransparentArgs {
         // the number of locations can be different depening on where the type is used
         pub num_locations: u32,
-        pub num_input_locations: u32,
     }
 
     unsafe impl ArgClass for TransparentArgs {}
@@ -1974,6 +1984,8 @@ pub mod vec {
         type From: Copy;
     }
 
+    pub unsafe trait NumVecType: VecType {}
+
     pub struct GlVec<T: VecType, L: VecLen> {
         phantom: PhantomData<(T, L)>,
     }
@@ -1986,65 +1998,17 @@ pub mod vec {
         }
     }
 
-    unsafe impl<T: VecType, L: VecLen> ArgParameter<TransparentArgs> for GlVec<T, L> {
+    unsafe impl<T: NumVecType, L: VecLen> ArgParameter<TransparentArgs> for GlVec<T, L> {
         fn get_param() -> TransparentArgs {
-            TransparentArgs {
-                num_locations: 1,
-                num_input_locations: 1,
-            }
+            TransparentArgs { num_locations: 1 }
         }
     }
 
-    unsafe impl<L: VecLen> ArgParameter<OutputArgs> for GlVec<VecFloat, L> {
+    unsafe impl<T: NumVecType, L: VecLen> ArgParameter<OutputArgs> for GlVec<T, L> {
         fn get_param() -> OutputArgs {
             OutputArgs
         }
     }
-
-    unsafe impl<L: VecLen> ArgParameter<OutputArgs> for GlVec<VecInt, L> {
-        fn get_param() -> OutputArgs {
-            OutputArgs
-        }
-    }
-
-    unsafe impl<L: VecLen> ArgParameter<OutputArgs> for GlVec<VecUInt, L> {
-        fn get_param() -> OutputArgs {
-            OutputArgs
-        }
-    }
-
-    macro_rules! vec_litteral {
-        ($t:ty, $l:ty, $($c:ty),*; $($place:ident),*) => (
-            impl Construct<'static, GlVec<$t, $l>, Constant> for ($($c),*) {
-                fn construct(self) -> ProgramBuilderItem<'static, GlVec<$t, $l>, Constant> {
-                    let ($($place),*) = self;
-                    let s = format!("{}(", <GlVec<$t, $l>>::data_type().gl_type());
-                    $(
-                        let s = format!("{}{}, ", s, $place);
-                    )*
-                    // remove the trailing comma
-                    let s = format!("{})", &s[..s.len()-2]);
-                    ProgramBuilderItem::create(VarString::new(s), Static)
-                }
-            }
-        )
-    }
-
-    macro_rules! vec_litterals {
-        ($($t:ty, $c:ty),*) => (
-            $(
-                vec_litteral!($t, Vec1, $c; U1);
-                vec_litteral!($t, Vec2, $c; U1);
-                vec_litteral!($t, Vec3, $c; U1);
-                vec_litteral!($t, Vec4, $c; U1);
-                vec_litteral!($t, Vec2, $c, $c; U1, U2);
-                vec_litteral!($t, Vec3, $c, $c, $c; U1, U2, U3);
-                vec_litteral!($t, Vec4, $c, $c, $c, $c; U1, U2, U3, U4);
-            )*
-        )
-    }
-
-    // vec_litterals!(VecFloat, f32, VecInt, i32, VecUInt, u32, VecBoolean, bool);
 
     #[derive(Clone, Copy)]
     pub struct VecFloat {
@@ -2085,6 +2049,12 @@ pub mod vec {
         const PTYPE: PrimType = PrimType::Boolean;
         type From = u32;
     }
+
+    unsafe impl NumVecType for VecFloat {}
+
+    unsafe impl NumVecType for VecInt {}
+
+    unsafe impl NumVecType for VecUInt {}
 
     unsafe impl<T: VecType, L: VecLen> ArgType for GlVec<T, L> {
         fn data_type() -> DataType {
@@ -2231,7 +2201,7 @@ pub mod vec {
     construct_vec!(U1, U2);
     construct_vec!(U1);
 
-    impl<T: VecType, L: VecLen> Add<GlVec<T, L>> for GlVec<T, L> {
+    impl<T: NumVecType, L: VecLen> Add<GlVec<T, L>> for GlVec<T, L> {
         type Output = GlVec<T, L>;
 
         fn add(self, rhs: GlVec<T, L>) -> GlVec<T, L> {
@@ -2241,7 +2211,7 @@ pub mod vec {
         }
     }
 
-    impl<T: VecType, L: VecLen> Sub<GlVec<T, L>> for GlVec<T, L> {
+    impl<T: NumVecType, L: VecLen> Sub<GlVec<T, L>> for GlVec<T, L> {
         type Output = GlVec<T, L>;
 
         fn sub(self, rhs: GlVec<T, L>) -> GlVec<T, L> {
@@ -2249,7 +2219,7 @@ pub mod vec {
         }
     }
 
-    impl<T: VecType, L: VecLen> Mul<GlVec<T, L>> for GlVec<T, Vec1> {
+    impl<T: NumVecType, L: VecLen> Mul<GlVec<T, L>> for GlVec<T, Vec1> {
         type Output = GlVec<T, L>;
 
         fn mul(self, rhs: GlVec<T, L>) -> GlVec<T, L> {
@@ -2257,7 +2227,7 @@ pub mod vec {
         }
     }
 
-    impl<T: VecType, L: VecLen> Div<GlVec<T, Vec1>> for GlVec<T, L> {
+    impl<T: NumVecType, L: VecLen> Div<GlVec<T, Vec1>> for GlVec<T, L> {
         type Output = GlVec<T, L>;
 
         fn div(self, rhs: GlVec<T, Vec1>) -> GlVec<T, L> {
@@ -2267,7 +2237,7 @@ pub mod vec {
 
     // annoying redundant implementations to avoid implementation conflicts
 
-    impl<T: VecType> Mul<GlVec<T, Vec1>> for GlVec<T, Vec2> {
+    impl<T: NumVecType> Mul<GlVec<T, Vec1>> for GlVec<T, Vec2> {
         type Output = GlVec<T, Vec2>;
 
         fn mul(self, rhs: GlVec<T, Vec1>) -> GlVec<T, Vec2> {
@@ -2275,7 +2245,7 @@ pub mod vec {
         }
     }
 
-    impl<T: VecType> Mul<GlVec<T, Vec1>> for GlVec<T, Vec3> {
+    impl<T: NumVecType> Mul<GlVec<T, Vec1>> for GlVec<T, Vec3> {
         type Output = GlVec<T, Vec3>;
 
         fn mul(self, rhs: GlVec<T, Vec1>) -> GlVec<T, Vec3> {
@@ -2283,13 +2253,35 @@ pub mod vec {
         }
     }
 
-    impl<T: VecType> Mul<GlVec<T, Vec1>> for GlVec<T, Vec4> {
+    impl<T: NumVecType> Mul<GlVec<T, Vec1>> for GlVec<T, Vec4> {
         type Output = GlVec<T, Vec4>;
 
         fn mul(self, rhs: GlVec<T, Vec1>) -> GlVec<T, Vec4> {
             unreachable!()
         }
     }
+
+    macro_rules! impl_compare {
+        ($f:ident, $sym:expr) => {
+            impl<'a, E: ExprType, T: NumVecType, L: VecLen> ProgramBuilderItem<'a, GlVec<T, L>, E> {
+                pub fn $f<R: ItemType<'a, Ty = GlVec<T, L>>>(&self, other: R) ->
+                    ProgramBuilderItem<'a, GlVec<VecBoolean, L>, <(E, R::Expr) as ExprCombine>::Min>
+                where
+                    (E, R::Expr): ExprCombine
+                {
+                    let s = var_format!("", $sym, ""; self.as_string(), other.as_string());
+                    ProgramBuilderItem::create(s, Expr)
+                }
+            }
+        }
+    }
+
+    impl_compare!(equals, "==");
+    impl_compare!(less, "<");
+    impl_compare!(greater, ">");
+    impl_compare!(lequal, "<=");
+    impl_compare!(gequal, ">=");
+    impl_compare!(nequal, "!=");
 
     pub unsafe trait MapFor<T: VecType, L: VecLen> {
         type L_Out: Maybe0VecLen;
@@ -2654,7 +2646,6 @@ macro_rules! mat_ops {
 
         mat_ops!($($($mat,)*;)* | $($($fmat,)*;)*);
     )
-
 }
 
 macro_rules! matrix_param {
@@ -2668,9 +2659,10 @@ macro_rules! matrix_param {
 
         unsafe impl ArgParameter<TransparentArgs> for $mat {
             fn get_param() -> TransparentArgs {
-                TransparentArgs { num_locations: 1, num_input_locations: $cols }
+                TransparentArgs { num_locations: $cols }
             }
         }
+
         matrix_param!($($m,)*;$l, $cols - 1);
     )
 }

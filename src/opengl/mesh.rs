@@ -61,7 +61,7 @@ pub struct IndexMesh<'a, T: ShaderArgs> {
 }
 
 impl<'a, T: ShaderArgsClass<TransparentArgs>> IndexMesh<'a, T> {
-    pub fn new<S: IntoMesh<Args = T> + 'a, I: IndexType>(
+    pub fn new_ref<S: IntoMesh<Args = T> + 'a, I: IndexType>(
         s: S,
         i: &'a ElementBuffer<I>,
     ) -> IndexMesh<'a, T> {
@@ -81,6 +81,32 @@ impl<'a, T: ShaderArgsClass<TransparentArgs>> IndexMesh<'a, T> {
             // note: types that implement IntoMesh should not be
             // send or sync, and should only be able to be constructed
             // on the thread owning the gl_draw
+            id: unsafe { get_mesh_id() },
+            _to_drop: to_drop.into_boxed_slice(),
+            phantom: PhantomData,
+        }
+    }
+
+    pub fn new<S: IntoMesh<Args = T> + 'a, I: IndexType>(
+        s: S,
+        i: ElementBuffer<I>,
+    ) -> IndexMesh<'a, T> {
+        let mut bindings = Vec::with_capacity(T::NARGS);
+        let mut to_drop = Vec::new();
+        let (indices, instances) = s.add_bindings(&mut bindings, &mut to_drop);
+        if instances == 0 {
+            panic!("The number of instances cannot be 0.");
+        }
+        let id = i.buffer.get_id();
+        let len = i.buffer.buffer_len;
+        to_drop.push(i.buffer);
+        IndexMesh {
+            bindings: bindings.into_boxed_slice(),
+            index_buffer: id,
+            index_type: I::TYPE,
+            num_indices: (len / std::mem::size_of::<I>()) as u32,
+            num_elements: indices,
+            num_instances: instances,
             id: unsafe { get_mesh_id() },
             _to_drop: to_drop.into_boxed_slice(),
             phantom: PhantomData,
@@ -420,11 +446,46 @@ impl<'a, T: ShaderArgs> Drop for ArrayMesh<'a, T> {
     }
 }
 
-unsafe impl<'a, T: ShaderArgs> Mesh<T> for IndexMesh<'a, T> {
-    type Drawer = ();
+pub struct IndexDrawer {
+    mode: GLenum,
+    index_type: GLuint,
+    num_indices: u32,
+    num_instances: u32,
+}
 
-    unsafe fn create_drawer(&self, mode: super::DrawMode) -> () {
-        unimplemented!();
+impl IndexDrawer {
+    pub fn draw_all(&self) {
+        self.draw_elements(0, self.num_indices);
+    }
+
+    pub fn draw_elements(&self, offset: usize, count: u32) {
+        if cfg!(feature = "draw_call_bounds_checks") {
+            if (offset + count as usize) > self.num_indices as usize {
+                panic!(
+                    "The mesh has {} indices, but the draw call requires {}.",
+                    self.num_indices,
+                    offset + count as usize,
+                );
+            }
+        }
+        unsafe {
+            gl::with_current(|gl| {
+                gl.DrawElements(self.mode, count as i32, self.index_type, offset as *const _)
+            });
+        }
+    }
+}
+
+unsafe impl<'a, T: ShaderArgs> Mesh<T> for IndexMesh<'a, T> {
+    type Drawer = IndexDrawer;
+
+    unsafe fn create_drawer(&self, mode: super::DrawMode) -> IndexDrawer {
+        IndexDrawer {
+            mode: mode.mode,
+            index_type: self.index_type,
+            num_indices: self.num_indices,
+            num_instances: self.num_instances,
+        }
     }
 
     unsafe fn bind(&self, gl: &Gl) {
@@ -524,6 +585,130 @@ impl<T: GlDataType> VertexBuffer<T> {
 
     pub fn into_inner(self) -> Buffer {
         self.buffer
+    }
+
+    /// Copies data from the buffer into the slice, starting at
+    /// `offset` and attempting to fill the entire slice.
+    ///
+    /// If `offset>self.len()`, no data will be copied. If `offset + dst.len() > self.len()` then
+    /// only the first `self.len() - offset` elements will be filled.
+    ///
+    /// The return of this function is a subslice of `dst` with only the elements
+    /// that were modified by this function.
+    pub fn get_buffer_data<'a>(
+        &self,
+        key: ContextKey,
+        dst: &'a mut [T],
+        offset: usize,
+    ) -> &'a mut [T] {
+        if offset > self.len() {
+            return &mut dst[..0];
+        }
+
+        let len1 = self.len() - offset;
+        let len2 = dst.len();
+
+        let len = std::cmp::min(len1, len2);
+
+        unsafe {
+            let buffer = inner_gl_unsafe_static().resource_list[self.buffer.get_id() as usize];
+            gl::with_current(|gl| {
+                let ptr = if cfg!(feature = "opengl45") {
+                    gl.BindBuffer(gl::ARRAY_BUFFER, buffer);
+                    gl.MapBufferRange(
+                        gl::ARRAY_BUFFER,
+                        offset as isize,
+                        len as isize,
+                        gl::MAP_READ_BIT,
+                    ) as *const T
+                } else {
+                    gl.MapNamedBufferRange(buffer, offset as isize, len as isize, gl::MAP_READ_BIT)
+                        as *const T
+                };
+                if ptr.is_null() {
+                    panic!("Opengl failed to map buffer.");
+                }
+                let dst_ptr = dst.as_mut_ptr();
+                // before opengl42, the alignment of the pointers isn't gaurunteed
+                if cfg!(feature = "opengl42") {
+                    std::ptr::copy_nonoverlapping(ptr, dst_ptr, len);
+                } else {
+                    std::ptr::copy_nonoverlapping(
+                        ptr as *const u8,
+                        dst_ptr as *mut u8,
+                        len * std::mem::size_of::<T>(),
+                    )
+                };
+                let success = if cfg!(feature = "opengl45") {
+                    gl.UnmapNamedBuffer(buffer)
+                } else {
+                    gl.UnmapBuffer(gl::ARRAY_BUFFER)
+                };
+                if success == 0 {
+                    panic!("Opengl failed to unmap buffer.");
+                }
+            });
+        }
+
+        &mut dst[..len]
+    }
+
+    /// Copies data from `src` into the buffer starting at
+    /// `offset` and copying as many elements from the slice as will fit
+    /// in the buffer.
+    pub fn set_buffer_data(&self, key: ContextKey, src: &[T], offset: usize) {
+        if offset > self.len() {
+            return;
+        }
+
+        let len1 = self.len() - offset;
+        let len2 = src.len();
+
+        let len = std::cmp::min(len1, len2);
+
+        unsafe {
+            let buffer = inner_gl_unsafe_static().resource_list[self.buffer.get_id() as usize];
+            gl::with_current(|gl| {
+                let ptr = if cfg!(feature = "opengl45") {
+                    gl.BindBuffer(gl::ARRAY_BUFFER, buffer);
+                    gl.MapBufferRange(
+                        gl::ARRAY_BUFFER,
+                        offset as isize,
+                        len as isize,
+                        gl::MAP_WRITE_BIT | gl::MAP_INVALIDATE_RANGE_BIT,
+                    ) as *mut T
+                } else {
+                    gl.MapNamedBufferRange(
+                        buffer,
+                        offset as isize,
+                        len as isize,
+                        gl::MAP_WRITE_BIT | gl::MAP_INVALIDATE_RANGE_BIT,
+                    ) as *mut T
+                };
+                if ptr.is_null() {
+                    panic!("Opengl failed to map buffer.");
+                }
+                let src_ptr = src.as_ptr();
+                // before opengl42, the alignment of the pointers isn't gaurunteed
+                if cfg!(feature = "opengl42") {
+                    std::ptr::copy_nonoverlapping(src_ptr, ptr, len);
+                } else {
+                    std::ptr::copy_nonoverlapping(
+                        src_ptr as *const u8,
+                        ptr as *mut u8,
+                        len * std::mem::size_of::<T>(),
+                    )
+                };
+                let success = if cfg!(feature = "opengl45") {
+                    gl.UnmapNamedBuffer(buffer)
+                } else {
+                    gl.UnmapBuffer(gl::ARRAY_BUFFER)
+                };
+                if success == 0 {
+                    panic!("Opengl failed to unmap buffer.");
+                }
+            });
+        }
     }
 }
 
@@ -978,6 +1163,12 @@ impl<T: IndexType> ElementBuffer<T> {
     }
 }
 
+impl<T: IndexType> From<VertexBuffer<T>> for ElementBuffer<T> {
+    fn from(b: VertexBuffer<T>) -> ElementBuffer<T> {
+        ElementBuffer::new(b.into_inner())
+    }
+}
+
 /// A generic buffer that can hold any type of data.
 ///
 /// Buffers in opengl fundamentally don't care about what type of data is in them (this is
@@ -992,13 +1183,13 @@ pub struct Buffer {
 
 impl Buffer {
     #[inline]
-    pub fn get_id(&self) -> u32 {
-        self.buffer_id
+    pub fn len(&self) -> usize {
+        self.buffer_len
     }
 
     #[inline]
-    pub fn len(&self) -> usize {
-        self.buffer_len
+    pub fn get_id(&self) -> u32 {
+        self.buffer_id
     }
 }
 
@@ -1056,7 +1247,7 @@ impl GlResource for Buffer {
             } else if cfg!(target_pointer_width = "32") {
                 let mut h = 0;
                 gl.GetBufferParameteriv(gl::ARRAY_BUFFER, gl::BUFFER_USAGE, &mut h);
-                (h << 32) as u64 + ptr as u64
+                (h as u64) << 32 + ptr as u64
             } else {
                 panic!("Supported pointer widths are 32 and 64 bits.");
             };

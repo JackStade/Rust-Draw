@@ -15,6 +15,12 @@ use std::thread;
 use crate::color;
 use crate::CoordinateSpace;
 
+pub use glfw::{Key, MouseButton};
+
+pub const LEFT_MOUSE: MouseButton = MouseButton::Button1;
+pub const RIGHT_MOUSE: MouseButton = MouseButton::Button2;
+pub const MIDDLE_MOUSE: MouseButton = MouseButton::Button3;
+
 use self::glfw::ffi as glfw_raw;
 use gl::types::*;
 use gl::Gl;
@@ -414,7 +420,7 @@ impl GlDraw {
     /// Note that it is generally assumed that there are no more than a few windows. Trying to
     /// open more than 10 or so may drastically reduce performance and may cause things to break.
     ///
-    /// Having multiple windows in general is likely to be unstable.
+    /// Having multiple windows in general is likely to be somewhat buggy.
     pub fn new_window(&mut self, width: u32, height: u32, name: &str) -> GlWindow {
         let gl_draw = inner_gl(self);
         let root_ptr = if gl_draw.windows.len() == 0 {
@@ -434,8 +440,11 @@ impl GlDraw {
             if window.is_null() {
                 panic!("GLFW failed to create window.");
             }
+
+            glfw_raw::glfwSetWindowUserPointer(window, WindowData::new() as *mut _);
             glfw_raw::glfwMakeContextCurrent(window);
             glfw_raw::glfwSetKeyCallback(window, Some(key_callback));
+            glfw_raw::glfwSetMouseButtonCallback(window, Some(mouse_button_callback));
             glfw_raw::glfwSetFramebufferSizeCallback(window, Some(resize_callback));
             window
         };
@@ -539,6 +548,15 @@ impl GlDraw {
 
     pub fn update(&self, surface: &mut WindowSurface) {
         let window = surface.window;
+        // note: glfwPollEvents calls callbacks that
+        // could generate aliased mutables if we aren't
+        // careful
+        {
+            let window_data = unsafe {
+                &mut *(glfw_raw::glfwGetWindowUserPointer(window.ptr) as *mut WindowData)
+            };
+            window_data.frame += 1;
+        }
         unsafe {
             glfw_raw::glfwSwapBuffers(window.ptr);
             glfw_raw::glfwPollEvents();
@@ -583,7 +601,37 @@ extern "C" fn key_callback(
     action: c_int,
     mods: c_int,
 ) {
-    // not currently used
+    // callbacks only get called on the main thread
+    let window_data =
+        unsafe { &mut *(glfw_raw::glfwGetWindowUserPointer(window) as *mut WindowData) };
+    let ind = key as usize;
+    let f = window_data.frame;
+    if action == glfw_raw::PRESS {
+        window_data.last_press[ind] = f;
+        window_data.last_typed[ind] = f;
+    } else if action == glfw_raw::RELEASE {
+        window_data.last_release[ind] = f;
+    } else {
+        window_data.last_typed[ind] = f;
+    }
+}
+
+extern "C" fn mouse_button_callback(
+    window: *mut glfw_raw::GLFWwindow,
+    button: c_int,
+    action: c_int,
+    mods: c_int,
+) {
+    // callbacks only get called on the main thread
+    let window_data =
+        unsafe { &mut *(glfw_raw::glfwGetWindowUserPointer(window) as *mut WindowData) };
+    let ind = button as usize;
+    let f = window_data.frame;
+    if action == glfw_raw::PRESS {
+        window_data.last_mouse_press[ind] = f;
+    } else if action == glfw_raw::RELEASE {
+        window_data.last_mouse_release[ind] = f;
+    }
 }
 
 #[allow(unused)]
@@ -607,12 +655,31 @@ pub struct GlWindow {
     phantom: PhantomData<std::rc::Rc<()>>,
 }
 
-pub(crate) struct WindowData {}
+const NUM_KEYS: usize = glfw_raw::KEY_LAST as usize + 1;
+const NUM_BUTTONS: usize = glfw_raw::MOUSE_BUTTON_LAST as usize + 1;
+
+pub(crate) struct WindowData {
+    frame: u64,
+    last_mouse_press: [u64; NUM_BUTTONS],
+    last_mouse_release: [u64; NUM_BUTTONS],
+    last_press: [u64; NUM_KEYS],
+    last_release: [u64; NUM_KEYS],
+    last_typed: [u64; NUM_KEYS],
+}
 
 impl WindowData {
     #[allow(unused)]
     fn new() -> *mut WindowData {
-        let data = Box::new(WindowData {});
+        let data = Box::new(WindowData {
+            // set this to one so that key_pressed is
+            // false on the first frame
+            frame: 1,
+            last_mouse_press: [0; NUM_BUTTONS],
+            last_mouse_release: [0; NUM_BUTTONS],
+            last_press: [0; NUM_KEYS],
+            last_release: [0; NUM_KEYS],
+            last_typed: [0; NUM_KEYS],
+        });
         Box::into_raw(data)
     }
 }
@@ -628,6 +695,58 @@ pub struct ContextKey<'a> {
 
 pub struct WindowSurface<'a> {
     window: &'a GlWindow,
+}
+
+impl<'a> WindowSurface<'a> {
+    #[inline]
+    pub fn get_width_height(&self) -> (i32, i32) {
+        self.window.get_width_height()
+    }
+
+    #[inline]
+    pub fn get_scale(&self) -> i32 {
+        self.window.get_scale()
+    }
+
+    #[inline]
+    pub fn key_is_down(&self, key: Key) -> bool {
+        self.window.key_is_down(key)
+    }
+
+    #[inline]
+    pub fn key_pressed(&self, key: Key) -> bool {
+        self.window.key_pressed(key)
+    }
+
+    #[inline]
+    pub fn key_released(&self, key: Key) -> bool {
+        self.window.key_released(key)
+    }
+
+    #[inline]
+    pub fn key_typed(&self, key: Key) -> bool {
+        self.window.key_typed(key)
+    }
+
+    #[inline]
+    pub fn cursor_position(&self) -> (f64, f64) {
+        self.window.cursor_position()
+    }
+
+    #[inline]
+    pub fn mouse_button_is_down(&self, button: MouseButton) -> bool {
+        self.window.mouse_button_is_down(button)
+    }
+
+    #[inline]
+    pub fn mouse_button_pressed(&self, button: MouseButton) -> bool {
+        self.window.mouse_button_pressed(button)
+    }
+
+    #[inline]
+    pub fn mouse_button_released(&self, button: MouseButton) -> bool {
+        self.window.mouse_button_released(button)
+    }
 }
 
 impl GlWindow {
@@ -651,29 +770,93 @@ impl GlWindow {
         )
     }
 
-    /*pub fn drawer<'a>(&'a self, gl: &'a mut GlDraw, cs: CoordinateSpace) -> DrawingSurface<'a> {
-        DrawingSurface {
-            gl: gl,
-            window: &self,
-            coordinate_space: cs,
-            transform: Cell::new(na::Matrix4::<f32>::identity()),
-        }
-    }*/
-
+    #[inline]
     pub fn get_width_height(&self) -> (i32, i32) {
         (self.width.get(), self.height.get())
     }
 
+    #[inline]
     pub fn get_scale(&self) -> i32 {
         self.scale.get()
+    }
+
+    #[inline]
+    pub fn key_is_down(&self, key: Key) -> bool {
+        // references to windows can only exist on the main thread
+        let window_data =
+            unsafe { &mut *(glfw_raw::glfwGetWindowUserPointer(self.ptr) as *mut WindowData) };
+        let last_press = window_data.last_press[key as usize];
+        let last_release = window_data.last_release[key as usize];
+        last_press > last_release || last_release == window_data.frame
+    }
+
+    #[inline]
+    pub fn key_pressed(&self, key: Key) -> bool {
+        // references to windows can only exist on the main thread
+        let window_data =
+            unsafe { &mut *(glfw_raw::glfwGetWindowUserPointer(self.ptr) as *mut WindowData) };
+        let last_press = window_data.last_press[key as usize];
+        last_press == window_data.frame
+    }
+
+    #[inline]
+    pub fn key_released(&self, key: Key) -> bool {
+        // references to windows can only exist on the main thread
+        let window_data =
+            unsafe { &mut *(glfw_raw::glfwGetWindowUserPointer(self.ptr) as *mut WindowData) };
+        let last_release = window_data.last_release[key as usize];
+        last_release == window_data.frame
+    }
+
+    #[inline]
+    pub fn key_typed(&self, key: Key) -> bool {
+        // references to windows can only exist on the main thread
+        let window_data =
+            unsafe { &mut *(glfw_raw::glfwGetWindowUserPointer(self.ptr) as *mut WindowData) };
+        let last_typed = window_data.last_typed[key as usize];
+        last_typed == window_data.frame
+    }
+
+    #[inline]
+    pub fn cursor_position(&self) -> (f64, f64) {
+        let mut x = 0.0;
+        let mut y = 0.0;
+        unsafe {
+            glfw_raw::glfwGetCursorPos(self.ptr, &mut x, &mut y);
+        }
+        (x, y)
+    }
+
+    pub fn mouse_button_is_down(&self, button: MouseButton) -> bool {
+        // references to windows can only exist on the main thread
+        let window_data =
+            unsafe { &mut *(glfw_raw::glfwGetWindowUserPointer(self.ptr) as *mut WindowData) };
+        let last_press = window_data.last_mouse_press[button as usize];
+        let last_release = window_data.last_mouse_release[button as usize];
+        last_press > last_release || last_release == window_data.frame
+    }
+
+    pub fn mouse_button_pressed(&self, button: MouseButton) -> bool {
+        // references to windows can only exist on the main thread
+        let window_data =
+            unsafe { &mut *(glfw_raw::glfwGetWindowUserPointer(self.ptr) as *mut WindowData) };
+        let last_press = window_data.last_mouse_press[button as usize];
+        last_press == window_data.frame
+    }
+
+    pub fn mouse_button_released(&self, button: MouseButton) -> bool {
+        // references to windows can only exist on the main thread
+        let window_data =
+            unsafe { &mut *(glfw_raw::glfwGetWindowUserPointer(self.ptr) as *mut WindowData) };
+        let last_release = window_data.last_mouse_release[button as usize];
+        last_release == window_data.frame
     }
 
     /// Closes the window. Note that a window is automatically closed when dropped, so this function
     /// doesn't do anything other than calling the destructor.
     ///
-    /// Using this function can cause a window to close before resources are dropped. This is behavior
-    /// is not unsafe, but it causes data to be moved off to the graphics card in to temporary storage
-    /// in main memory, which can be a slow operation.
+    /// Because this cause the window to be dropped before resources are dropped, this function is
+    /// often slower than allowing the window to close by going out of scope.
     pub fn close(self) {}
 }
 
@@ -685,6 +868,7 @@ impl Drop for GlWindow {
             }
         }
         window_cleanup(self.ptr);
+        let _to_drop = unsafe { Box::from_raw(glfw_raw::glfwGetWindowUserPointer(self.ptr)) };
         let global_data = unsafe { &mut WINDOW_GLOBAL };
         let gl_draw = unsafe { inner_gl_unsafe() };
         let pos = gl_draw
