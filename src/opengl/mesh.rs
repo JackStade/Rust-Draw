@@ -419,11 +419,16 @@ impl ArrayDrawer {
                 );
             }
             if instances > self.num_instances {
-                panic!("The mesh has {} instances but the draw call requires {}.", self.num_instances, instances);
+                panic!(
+                    "The mesh has {} instances but the draw call requires {}.",
+                    self.num_instances, instances
+                );
             }
         }
         unsafe {
-            gl::with_current(|gl| gl.DrawArraysInstanced(self.mode, start as i32, count as i32, instances as i32));
+            gl::with_current(|gl| {
+                gl.DrawArraysInstanced(self.mode, start as i32, count as i32, instances as i32)
+            });
         }
     }
 }
@@ -488,6 +493,35 @@ impl IndexDrawer {
         unsafe {
             gl::with_current(|gl| {
                 gl.DrawElements(self.mode, count as i32, self.index_type, offset as *const _)
+            });
+        }
+    }
+
+    pub fn draw_instanced(&self, offset: usize, count: u32, instances: u32) {
+        if cfg!(feature = "draw_call_bounds_checks") {
+            if (offset + count as usize) > self.num_indices as usize {
+                panic!(
+                    "The mesh has {} indices, but the draw call requires {}.",
+                    self.num_indices,
+                    offset + count as usize,
+                );
+            }
+            if instances > self.num_instances {
+                panic!(
+                    "The mesh has {} instances but the draw call requires {}.",
+                    self.num_instances, instances
+                );
+            }
+        }
+        unsafe {
+            gl::with_current(|gl| {
+                gl.DrawElementsInstanced(
+                    self.mode,
+                    count as i32,
+                    self.index_type,
+                    offset as *const _,
+                    instances as i32,
+                )
             });
         }
     }
@@ -627,40 +661,8 @@ impl<T: GlDataType> VertexBuffer<T> {
         unsafe {
             let buffer = inner_gl_unsafe_static().resource_list[self.buffer.get_id() as usize];
             gl::with_current(|gl| {
-                let ptr = if cfg!(feature = "opengl45") {
-                    gl.BindBuffer(gl::ARRAY_BUFFER, buffer);
-                    gl.MapBufferRange(
-                        gl::ARRAY_BUFFER,
-                        offset as isize,
-                        len as isize,
-                        gl::MAP_READ_BIT,
-                    ) as *const T
-                } else {
-                    gl.MapNamedBufferRange(buffer, offset as isize, len as isize, gl::MAP_READ_BIT)
-                        as *const T
-                };
-                if ptr.is_null() {
-                    panic!("Opengl failed to map buffer.");
-                }
-                let dst_ptr = dst.as_mut_ptr();
-                // before opengl42, the alignment of the pointers isn't gaurunteed
-                if cfg!(feature = "opengl42") {
-                    std::ptr::copy_nonoverlapping(ptr, dst_ptr, len);
-                } else {
-                    std::ptr::copy_nonoverlapping(
-                        ptr as *const u8,
-                        dst_ptr as *mut u8,
-                        len * std::mem::size_of::<T>(),
-                    )
-                };
-                let success = if cfg!(feature = "opengl45") {
-                    gl.UnmapNamedBuffer(buffer)
-                } else {
-                    gl.UnmapBuffer(gl::ARRAY_BUFFER)
-                };
-                if success == 0 {
-                    panic!("Opengl failed to unmap buffer.");
-                }
+                gl.BindBuffer(gl::ARRAY_BUFFER, buffer);
+                gl.GetBufferSubData(gl::ARRAY_BUFFER, offset as isize, len as isize, dst.as_mut_ptr() as *mut _);
             });
         }
 
@@ -683,44 +685,8 @@ impl<T: GlDataType> VertexBuffer<T> {
         unsafe {
             let buffer = inner_gl_unsafe_static().resource_list[self.buffer.get_id() as usize];
             gl::with_current(|gl| {
-                let ptr = if cfg!(feature = "opengl45") {
-                    gl.BindBuffer(gl::ARRAY_BUFFER, buffer);
-                    gl.MapBufferRange(
-                        gl::ARRAY_BUFFER,
-                        offset as isize,
-                        len as isize,
-                        gl::MAP_WRITE_BIT | gl::MAP_INVALIDATE_RANGE_BIT,
-                    ) as *mut T
-                } else {
-                    gl.MapNamedBufferRange(
-                        buffer,
-                        offset as isize,
-                        len as isize,
-                        gl::MAP_WRITE_BIT | gl::MAP_INVALIDATE_RANGE_BIT,
-                    ) as *mut T
-                };
-                if ptr.is_null() {
-                    panic!("Opengl failed to map buffer.");
-                }
-                let src_ptr = src.as_ptr();
-                // before opengl42, the alignment of the pointers isn't gaurunteed
-                if cfg!(feature = "opengl42") {
-                    std::ptr::copy_nonoverlapping(src_ptr, ptr, len);
-                } else {
-                    std::ptr::copy_nonoverlapping(
-                        src_ptr as *const u8,
-                        ptr as *mut u8,
-                        len * std::mem::size_of::<T>(),
-                    )
-                };
-                let success = if cfg!(feature = "opengl45") {
-                    gl.UnmapNamedBuffer(buffer)
-                } else {
-                    gl.UnmapBuffer(gl::ARRAY_BUFFER)
-                };
-                if success == 0 {
-                    panic!("Opengl failed to unmap buffer.");
-                }
+                gl.BindBuffer(gl::ARRAY_BUFFER, buffer);
+                gl.BufferSubData(gl::ARRAY_BUFFER, offset as isize, (len * mem::size_of::<T>()) as isize, src.as_ptr() as *const _);
             });
         }
     }
